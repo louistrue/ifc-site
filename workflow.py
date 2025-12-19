@@ -9,6 +9,40 @@ import os
 import requests
 import json
 
+def _circular_median(values, window_size):
+    """Smooth values with a circular median filter."""
+    n = len(values)
+    if n == 0:
+        return []
+
+    window_size = min(window_size, n)
+    if window_size % 2 == 0:
+        window_size -= 1
+    if window_size < 1:
+        window_size = 1
+
+    half_window = window_size // 2
+    smoothed = []
+    for i in range(n):
+        window = [values[(i + j) % n] for j in range(-half_window, half_window + 1)]
+        smoothed.append(float(np.median(window)))
+    return smoothed
+
+def _best_fit_plane(ext_coords):
+    """Project coordinates onto a best-fit plane to flatten bumps while keeping tilt."""
+    if len(ext_coords) < 3:
+        return [c[2] for c in ext_coords]
+
+    arr = np.array(ext_coords, dtype=float)
+    A = np.column_stack((arr[:, 0], arr[:, 1], np.ones(len(arr))))
+    try:
+        coeffs, _, _, _ = np.linalg.lstsq(A, arr[:, 2], rcond=None)
+    except np.linalg.LinAlgError:
+        return [c[2] for c in ext_coords]
+
+    plane_z = A @ coeffs
+    return plane_z.tolist()
+
 def fetch_boundary_by_egrid(egrid):
     """
     Fetch the cadastral boundary (Polygon) for a given EGRID via geo.admin.ch API.
@@ -206,17 +240,20 @@ def create_cadastral_ifc(gdf_3d, output_path, offset_x=0.0, offset_y=0.0, offset
         if ext_coords[0] == ext_coords[-1]:
             ext_coords = ext_coords[:-1]
             
-        # Apply median filter to smooth Z-coordinates of the solid terrain
-        window_size = 5
-        half_window = window_size // 2
+        # Apply aggressive smoothing: fit plane for tilt, then heavily damp residual bumps
         z_values = [c[2] for c in ext_coords]
-        smoothed_z = []
-        n = len(z_values)
-        for i in range(n):
-            # Use wrap-around for the closed loop
-            window = [z_values[(i + j) % n] for j in range(-half_window, half_window + 1)]
-            smoothed_z.append(float(np.median(window)))
-        ext_coords = [(ext_coords[i][0], ext_coords[i][1], smoothed_z[i]) for i in range(n)]
+        plane_z = _best_fit_plane(ext_coords)
+
+        # Smooth raw heights and residuals separately to kill small bumps
+        smoothed_z = _circular_median(z_values, window_size=9)
+        residuals = [sz - pz for sz, pz in zip(smoothed_z, plane_z)]
+        smoothed_residuals = _circular_median(residuals, window_size=9)
+
+        # Heavily attenuate residuals so the top stays flat but keeps overall orientation
+        residual_scale = 0.2
+        flattened_z = [pz + residual_scale * rz for pz, rz in zip(plane_z, smoothed_residuals)]
+
+        ext_coords = [(ext_coords[i][0], ext_coords[i][1], flattened_z[i]) for i in range(len(ext_coords))]
             
         base_elevation = min(z for _, _, z in ext_coords) - 2.0 # 2 meters below lowest point
         
