@@ -177,6 +177,22 @@ def create_cadastral_ifc(gdf_3d, output_path, offset_x=0.0, offset_y=0.0, offset
     ifcopenshell.api.run("unit.assign_unit", model, units=[length_unit])
     context = ifcopenshell.api.run("context.add_context", model, 
                                     context_type="Model")
+    body_context = ifcopenshell.api.run(
+        "context.add_context",
+        model,
+        context_type="Model",
+        context_identifier="Body",
+        target_view="MODEL_VIEW",
+        parent=context,
+    )
+    footprint_context = ifcopenshell.api.run(
+        "context.add_context",
+        model,
+        context_type="Plan",
+        context_identifier="FootPrint",
+        target_view="PLAN_VIEW",
+        parent=context,
+    )
     
     crs = model.createIfcProjectedCRS(
         Name="EPSG:2056",
@@ -213,25 +229,37 @@ def create_cadastral_ifc(gdf_3d, output_path, offset_x=0.0, offset_y=0.0, offset
                                      name=str(name))
         # Aggregate site to project for proper spatial hierarchy
         ifcopenshell.api.run("aggregate.assign_object", model, products=[site], relating_object=project)
+
+        site_placement = ifcopenshell.api.run(
+            "geometry.edit_object_placement", model, product=site
+        )
         
         # 1. Keep PolyLine Footprint on Site for visibility (what the user liked)
         coords = [(float(x - offset_x), float(y - offset_y), float(z - offset_z)) 
                   for x, y, z in row.geometry.exterior.coords]
-        points = [model.createIfcCartesianPoint(list(c)) for c in coords]
-        polyline = model.createIfcPolyLine(points)
+        footprint_points = [model.createIfcCartesianPoint([c[0], c[1]]) for c in coords]
+        polyline = model.createIfcPolyLine(footprint_points)
         rep_site = model.createIfcShapeRepresentation(
-            context, "FootPrint", "Curve2D", [polyline])
+            footprint_context, "FootPrint", "Curve2D", [polyline])
         site.Representation = model.createIfcProductDefinitionShape(
             None, None, [rep_site])
 
         # 2. Create IfcGeographicElement for proper Terrain Representation
         # Add Local Placement (Crucial for visibility!)
-        placement = ifcopenshell.api.run("geometry.edit_object_placement", model, product=site) # Default relative to site
         terrain = ifcopenshell.api.run("root.create_entity", model,
                                         ifc_class="IfcGeographicElement",
                                         name=f"Terrain_{name}")
-        terrain.ObjectPlacement = placement
         terrain.PredefinedType = "TERRAIN"
+
+        # Create placement relative to site
+        # Since edit_object_placement doesn't support relative_to, we create it manually
+        origin = model.createIfcCartesianPoint([0., 0., 0.])
+        axis = model.createIfcDirection([0., 0., 1.])
+        ref_direction = model.createIfcDirection([1., 0., 0.])
+        axis2_placement = model.createIfcAxis2Placement3D(origin, axis, ref_direction)
+        # site.ObjectPlacement is the placement to reference
+        terrain_placement = model.createIfcLocalPlacement(site.ObjectPlacement, axis2_placement)
+        terrain.ObjectPlacement = terrain_placement
         
         # Assign terrain to site
         ifcopenshell.api.run("spatial.assign_container", model,
@@ -280,6 +308,11 @@ def create_cadastral_ifc(gdf_3d, output_path, offset_x=0.0, offset_y=0.0, offset
         faces = []
 
         for tri in triangulate(polygon_2d):
+            # Filter out triangles that extend beyond the polygon boundary
+            # Delaunay triangulation fills the convex hull, so we need to check containment
+            if not polygon_2d.contains(tri.centroid):
+                continue
+            
             oriented_tri = orient(tri, sign=1.0)
             tri_coords = list(oriented_tri.exterior.coords)[:-1]  # drop closing vertex
             tri_points = [
@@ -312,10 +345,10 @@ def create_cadastral_ifc(gdf_3d, output_path, offset_x=0.0, offset_y=0.0, offset
         faces.append(bot_face)
         
         shell = model.createIfcClosedShell(faces)
-        solid = model.createIfcManifoldSolidBrep(shell)
+        solid = model.createIfcFacetedBrep(shell)
         
         rep_terrain = model.createIfcShapeRepresentation(
-            context, "Body", "Brep", [solid])
+            body_context, "Body", "Brep", [solid])
         terrain.Representation = model.createIfcProductDefinitionShape(
             None, None, [rep_terrain])
 
