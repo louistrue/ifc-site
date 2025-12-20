@@ -21,6 +21,24 @@ import argparse
 import time
 import sys
 import math
+import json
+import struct
+import subprocess
+import tempfile
+import os
+try:
+    import trimesh
+except ImportError:
+    trimesh = None
+try:
+    import DracoPy
+except ImportError:
+    DracoPy = None
+from pyproj import Transformer
+try:
+    import pygltflib
+except ImportError:
+    pygltflib = None
 
 
 def fetch_boundary_by_egrid(egrid):
@@ -242,9 +260,1134 @@ def _close_ring(ring):
     return ring
 
 
+# ============================================================================
+# 3D Tiles (b3dm) Support Functions
+# ============================================================================
+
+def _region_to_bbox(region):
+    """
+    Convert Cesium region [west, south, east, north, min_height, max_height] to bbox.
+    Region is in radians (WGS84).
+    """
+    west, south, east, north, min_h, max_h = region
+    # Convert radians to degrees
+    west_deg = math.degrees(west)
+    south_deg = math.degrees(south)
+    east_deg = math.degrees(east)
+    north_deg = math.degrees(north)
+    return (west_deg, south_deg, east_deg, north_deg)
+
+
+def _bbox_intersects_region(bbox_lv95, region, buffer_meters=500):
+    """
+    Check if EPSG:2056 bbox intersects with Cesium region.
+    bbox_lv95: (minx, miny, maxx, maxy) in EPSG:2056
+    region: [west, south, east, north, min_height, max_height] in radians
+    buffer_meters: Buffer distance in meters to include nearby tiles
+    """
+    if not region or len(region) < 4:
+        return True  # If no region info, include it
+    
+    # Transform bbox to WGS84 for comparison
+    transformer = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
+    minx, miny, maxx, maxy = bbox_lv95
+    
+    # Transform bbox corners to WGS84
+    corners_lv95 = [
+        (minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy),
+        ((minx + maxx) / 2, (miny + maxy) / 2)  # Center point
+    ]
+    corners_wgs84 = [transformer.transform(x, y) for x, y in corners_lv95]
+    
+    west, south, east, north, _, _ = region
+    west_deg = math.degrees(west)
+    south_deg = math.degrees(south)
+    east_deg = math.degrees(east)
+    north_deg = math.degrees(north)
+    
+    # Check if any bbox corner is in region
+    for lon, lat in corners_wgs84:
+        if west_deg <= lon <= east_deg and south_deg <= lat <= north_deg:
+            return True
+    
+    # Check if region center is in bbox
+    center_lon = (west_deg + east_deg) / 2
+    center_lat = (south_deg + north_deg) / 2
+    center_x, center_y = transformer.transform(center_lon, center_lat, direction="INVERSE")
+    if minx <= center_x <= maxx and miny <= center_y <= maxy:
+        return True
+    
+    # Check if bbox overlaps region (more comprehensive check)
+    bbox_min_lon = min(lon for lon, lat in corners_wgs84)
+    bbox_max_lon = max(lon for lon, lat in corners_wgs84)
+    bbox_min_lat = min(lat for lon, lat in corners_wgs84)
+    bbox_max_lat = max(lat for lon, lat in corners_wgs84)
+    
+    # Check for overlap: regions overlap if they don't NOT overlap
+    # Two boxes overlap if: max_lon >= min_lon AND max_lat >= min_lat (for both)
+    if not (bbox_max_lon < west_deg or bbox_min_lon > east_deg or 
+            bbox_max_lat < south_deg or bbox_min_lat > north_deg):
+        return True
+    
+    # Also check in EPSG:2056 for more accurate overlap detection
+    # Transform region corners to EPSG:2056
+    transformer_lv95 = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
+    region_corners_wgs84 = [
+        (west_deg, south_deg), (east_deg, south_deg),
+        (east_deg, north_deg), (west_deg, north_deg)
+    ]
+    region_corners_lv95 = [transformer_lv95.transform(lon, lat) for lon, lat in region_corners_wgs84]
+    region_min_x = min(x for x, y in region_corners_lv95)
+    region_max_x = max(x for x, y in region_corners_lv95)
+    region_min_y = min(y for x, y in region_corners_lv95)
+    region_max_y = max(y for x, y in region_corners_lv95)
+    
+    # Expand bbox by buffer to include nearby tiles
+    expanded_minx = minx - buffer_meters
+    expanded_miny = miny - buffer_meters
+    expanded_maxx = maxx + buffer_meters
+    expanded_maxy = maxy + buffer_meters
+    
+    # Check overlap in EPSG:2056 (with buffer)
+    if not (region_max_x < expanded_minx or region_min_x > expanded_maxx or 
+            region_max_y < expanded_miny or region_min_y > expanded_maxy):
+        return True
+    
+    return False
+
+
+def calculate_tile_coordinates(bbox_lv95, zoom_level=11):
+    """
+    Calculate which 3D Tiles cover the given EPSG:2056 bounding box.
+    Returns list of (z, x, y) tile coordinates.
+    
+    Note: This is approximate - 3D Tiles use a quadtree structure based on
+    geographic regions, not a simple tile grid like web maps.
+    """
+    # Transform bbox to WGS84
+    transformer = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
+    minx, miny, maxx, maxy = bbox_lv95
+    
+    corners = [
+        (minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)
+    ]
+    lons, lats = zip(*[transformer.transform(x, y) for x, y in corners])
+    
+    min_lon, max_lon = min(lons), max(lons)
+    min_lat, max_lat = min(lats), max(lats)
+    
+    # Convert to tile coordinates (Web Mercator-like tiling)
+    # This is approximate - actual 3D Tiles use region-based quadtree
+    def deg_to_tile(lat_deg, lon_deg, zoom):
+        n = 2.0 ** zoom
+        x = int((lon_deg + 180.0) / 360.0 * n)
+        lat_rad = math.radians(lat_deg)
+        y = int((1.0 - math.log(math.tan(lat_rad) + (1 / math.cos(lat_rad))) / math.pi) / 2.0 * n)
+        return x, y
+    
+    min_tile_x, max_tile_y = deg_to_tile(min_lat, min_lon, zoom_level)
+    max_tile_x, min_tile_y = deg_to_tile(max_lat, max_lon, zoom_level)
+    
+    tiles = []
+    for x in range(min_tile_x, max_tile_x + 1):
+        for y in range(min_tile_y, max_tile_y + 1):
+            tiles.append((zoom_level, x, y))
+    
+    return tiles
+
+
+def fetch_and_parse_tileset(base_url, date=None):
+    """
+    Fetch and parse tileset.json from 3D Tiles service.
+    Returns parsed JSON data.
+    
+    Args:
+        base_url: Base URL or full URL. If it ends with 'tileset.json', treated as full URL.
+        date: Optional date string (YYYYMMDD) for date-based tilesets.
+    """
+    # If base_url already ends with tileset.json, use it directly
+    if base_url.endswith('tileset.json'):
+        tileset_url = base_url
+    elif date:
+        tileset_url = f"{base_url}/{date}/tileset.json"
+    else:
+        # Ensure it ends with tileset.json
+        if base_url.endswith('/'):
+            tileset_url = f"{base_url}tileset.json"
+        else:
+            tileset_url = f"{base_url}/tileset.json"
+    
+    try:
+        response = requests.get(tileset_url, timeout=30)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        # Don't print errors for nested tilesets (they might not exist)
+        return None
+
+
+def parse_b3dm_header(b3dm_data):
+    """
+    Parse b3dm header (28 bytes).
+    Returns dict with header fields.
+    """
+    if len(b3dm_data) < 28:
+        return None
+    
+    magic = b3dm_data[0:4]
+    if magic != b'b3dm':
+        return None
+    
+    version, = struct.unpack('<I', b3dm_data[4:8])
+    byte_length, = struct.unpack('<I', b3dm_data[8:12])
+    feature_table_json_byte_length, = struct.unpack('<I', b3dm_data[12:16])
+    feature_table_binary_byte_length, = struct.unpack('<I', b3dm_data[16:20])
+    batch_table_json_byte_length, = struct.unpack('<I', b3dm_data[20:24])
+    batch_table_binary_byte_length, = struct.unpack('<I', b3dm_data[24:28])
+    
+    header_end = 28
+    feature_table_json_start = header_end
+    feature_table_json_end = feature_table_json_start + feature_table_json_byte_length
+    feature_table_binary_start = feature_table_json_end
+    feature_table_binary_end = feature_table_binary_start + feature_table_binary_byte_length
+    batch_table_json_start = feature_table_binary_end
+    batch_table_json_end = batch_table_json_start + batch_table_json_byte_length
+    batch_table_binary_start = batch_table_json_end
+    glb_start = batch_table_json_start + batch_table_json_byte_length + batch_table_binary_byte_length
+    
+    return {
+        'version': version,
+        'byte_length': byte_length,
+        'feature_table_json': b3dm_data[feature_table_json_start:feature_table_json_end],
+        'feature_table_binary': b3dm_data[feature_table_binary_start:feature_table_binary_end],
+        'batch_table_json': b3dm_data[batch_table_json_start:batch_table_json_end] if batch_table_json_byte_length > 0 else b'',
+        'batch_table_binary': b3dm_data[batch_table_binary_start:glb_start] if batch_table_binary_byte_length > 0 else b'',
+        'glb_data': b3dm_data[glb_start:]
+    }
+
+
+def parse_glb_geometries(glb_data):
+    """
+    Parse GLB data and extract building geometries.
+    Handles both uncompressed and Draco-compressed meshes.
+    Returns list of building meshes: [{'vertices': [...], 'faces': [...], 'batch_id': ...}, ...]
+    """
+    # First check if Draco compression is used - if so, use DracoPy directly
+    # (trimesh doesn't handle Draco correctly)
+    try:
+        json_chunk_length = struct.unpack('<I', glb_data[12:16])[0]
+        json_end = 20 + json_chunk_length
+        json_data = glb_data[20:json_end]
+        gltf_json = json.loads(json_data.decode('utf-8'))
+        
+        # Check for Draco compression
+        has_draco = False
+        for mesh_json in gltf_json.get('meshes', []):
+            for prim in mesh_json.get('primitives', []):
+                if 'extensions' in prim and 'KHR_draco_mesh_compression' in prim['extensions']:
+                    has_draco = True
+                    break
+            if has_draco:
+                break
+        
+        if has_draco and DracoPy is not None:
+            # Skip trimesh - use DracoPy directly
+            pass
+        elif trimesh is not None:
+            # Try using trimesh for uncompressed GLB files
+            try:
+                import io
+                glb_file = io.BytesIO(glb_data)
+                scene = trimesh.load(glb_file, file_type='glb')
+                
+                buildings = []
+                if isinstance(scene, trimesh.Scene):
+                    for name, mesh in scene.geometry.items():
+                        if hasattr(mesh, 'vertices') and hasattr(mesh, 'faces'):
+                            vertices = mesh.vertices.tolist()
+                            faces = mesh.faces.tolist()
+                            # Check if vertices are valid (not all zeros)
+                            if len(vertices) > 0 and any(v[0] != 0 or v[1] != 0 or v[2] != 0 for v in vertices):
+                                buildings.append({
+                                    'vertices': vertices,
+                                    'faces': faces,
+                                    'batch_id': None
+                                })
+                elif isinstance(scene, trimesh.Trimesh):
+                    vertices = scene.vertices.tolist()
+                    faces = scene.faces.tolist()
+                    if len(vertices) > 0 and any(v[0] != 0 or v[1] != 0 or v[2] != 0 for v in vertices):
+                        buildings.append({
+                            'vertices': vertices,
+                            'faces': faces,
+                            'batch_id': None
+                        })
+                
+                if buildings:
+                    return buildings
+            except Exception as e:
+                # trimesh failed, fall back to manual parsing
+                pass
+    except Exception:
+        # If JSON parsing fails, continue to manual parsing
+        pass
+    
+    if pygltflib is None:
+        print("    Error: pygltflib not installed. Install with: pip install pygltflib")
+        return []
+    
+    try:
+        # Parse GLB file
+        gltf = pygltflib.GLTF2().load_from_bytes(glb_data)
+        buildings = []
+        
+        # Extract binary data from GLB chunks
+        # GLB format: [12-byte header][JSON chunk][Binary chunk]
+        # Header: magic(4) + version(4) + length(4)
+        # JSON chunk: length(4) + type(4) + data
+        # Binary chunk: length(4) + type(4) + data
+        
+        # Parse GLB header
+        if len(glb_data) < 12:
+            return []
+        
+        magic = glb_data[0:4]
+        if magic != b'glTF':
+            return []
+        
+        version = struct.unpack('<I', glb_data[4:8])[0]
+        total_length = struct.unpack('<I', glb_data[8:12])[0]
+        
+        # Parse JSON chunk header
+        if len(glb_data) < 20:
+            return []
+        
+        json_chunk_length = struct.unpack('<I', glb_data[12:16])[0]
+        json_chunk_type = glb_data[16:20]
+        
+        if json_chunk_type != b'JSON':
+            return []
+        
+        # JSON data starts at offset 20
+        json_end = 20 + json_chunk_length
+        
+        # Binary chunk starts after JSON chunk
+        if len(glb_data) < json_end + 8:
+            return []
+        
+        binary_chunk_length = struct.unpack('<I', glb_data[json_end:json_end+4])[0]
+        binary_chunk_type = glb_data[json_end+4:json_end+8]
+        
+        if binary_chunk_type != b'BIN\0':
+            return []
+        
+        binary_data_start = json_end + 8
+        binary_data = glb_data[binary_data_start:binary_data_start + binary_chunk_length]
+        
+        # Parse JSON to check for Draco compression FIRST
+        json_data = glb_data[20:json_end]
+        gltf_json = json.loads(json_data.decode('utf-8'))
+        
+        # Check if any mesh uses Draco compression and decode it FIRST (before fallback)
+        if DracoPy is not None:
+            draco_found = False
+            for mesh_idx, mesh_json in enumerate(gltf_json.get('meshes', [])):
+                for prim_idx, prim in enumerate(mesh_json.get('primitives', [])):
+                    if 'extensions' in prim and 'KHR_draco_mesh_compression' in prim['extensions']:
+                        draco_found = True
+                        draco_ext = prim['extensions']['KHR_draco_mesh_compression']
+                        buffer_view_idx = draco_ext.get('bufferView')
+                        
+                        if buffer_view_idx is not None and buffer_view_idx < len(gltf.bufferViews):
+                            buffer_view = gltf.bufferViews[buffer_view_idx]
+                            byte_offset = buffer_view.byteOffset or 0
+                            byte_length = buffer_view.byteLength
+                            
+                            # Extract compressed Draco data
+                            compressed_data = binary_data[byte_offset:byte_offset + byte_length]
+                            
+                            try:
+                                # Decode Draco-compressed mesh
+                                decoded_mesh = DracoPy.decode(compressed_data)
+                                
+                                # Extract vertices and faces
+                                vertices = []
+                                if hasattr(decoded_mesh, 'points') and decoded_mesh.points is not None:
+                                    import numpy as np
+                                    if isinstance(decoded_mesh.points, np.ndarray):
+                                        vertices = decoded_mesh.points.tolist()
+                                    else:
+                                        vertices = list(decoded_mesh.points)
+                                
+                                faces = []
+                                if hasattr(decoded_mesh, 'faces') and decoded_mesh.faces is not None:
+                                    import numpy as np
+                                    if isinstance(decoded_mesh.faces, np.ndarray):
+                                        faces = decoded_mesh.faces.tolist()
+                                    else:
+                                        faces = list(decoded_mesh.faces)
+                                
+                                if vertices and len(vertices) > 0:
+                                    buildings.append({
+                                        'vertices': vertices,
+                                        'faces': faces,
+                                        'batch_id': None
+                                    })
+                                    print(f"    ✓ Decoded Draco mesh {mesh_idx}/{prim_idx}: {len(vertices)} vertices, {len(faces)} faces")
+                                    
+                            except Exception as e:
+                                print(f"    Error decoding Draco mesh {mesh_idx}/{prim_idx}: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                continue
+            
+            if draco_found and buildings:
+                print(f"    Successfully decoded {len(buildings)} Draco-compressed meshes")
+                return buildings
+            elif draco_found:
+                print(f"    ⚠️  Draco compression detected but decoding failed - trying fallback")
+        
+        # Extract meshes from all scenes
+        scenes_to_process = []
+        if gltf.scene is not None:
+            scenes_to_process.append(gltf.scenes[gltf.scene])
+        else:
+            scenes_to_process.extend(gltf.scenes or [])
+        
+        if not scenes_to_process:
+            # Try processing all nodes directly if no scenes
+            for node in gltf.nodes or []:
+                if node.mesh is not None:
+                    mesh = gltf.meshes[node.mesh]
+                    for primitive in mesh.primitives:
+                        # Get accessor indices - attributes is an Attributes object, not a dict
+                        position_accessor_idx = None
+                        if hasattr(primitive.attributes, 'POSITION'):
+                            position_accessor_idx = primitive.attributes.POSITION
+                        indices_accessor_idx = primitive.indices
+                        
+                        if position_accessor_idx is None:
+                            continue
+                        
+                        # Extract vertices
+                        if position_accessor_idx >= len(gltf.accessors):
+                            continue
+                        position_accessor = gltf.accessors[position_accessor_idx]
+                        buffer_view_idx = position_accessor.bufferView
+                        if buffer_view_idx is None or buffer_view_idx >= len(gltf.bufferViews):
+                            continue
+                        buffer_view = gltf.bufferViews[buffer_view_idx]
+                        
+                        # Extract vertex positions from binary data
+                        byte_offset = (buffer_view.byteOffset or 0) + (position_accessor.byteOffset or 0)
+                        byte_stride = buffer_view.byteStride or (3 * 4)  # 3 floats * 4 bytes
+                        count = position_accessor.count
+                        
+                        vertices = []
+                        for i in range(count):
+                            offset = byte_offset + i * byte_stride
+                            if offset + 12 <= len(binary_data):
+                                x, y, z = struct.unpack('<fff', binary_data[offset:offset+12])
+                                vertices.append([x, y, z])
+                        
+                        # Extract face indices
+                        faces = []
+                        if indices_accessor_idx is not None:
+                            if indices_accessor_idx >= len(gltf.accessors):
+                                continue
+                            indices_accessor = gltf.accessors[indices_accessor_idx]
+                            indices_buffer_view_idx = indices_accessor.bufferView
+                            if indices_buffer_view_idx is None or indices_buffer_view_idx >= len(gltf.bufferViews):
+                                continue
+                            indices_buffer_view = gltf.bufferViews[indices_buffer_view_idx]
+                            
+                            indices_byte_offset = (indices_buffer_view.byteOffset or 0) + (indices_accessor.byteOffset or 0)
+                            
+                            # Determine index type
+                            if indices_accessor.componentType == 5123:  # UNSIGNED_SHORT
+                                index_size = 2
+                                unpack_fmt = '<H'
+                            elif indices_accessor.componentType == 5125:  # UNSIGNED_INT
+                                index_size = 4
+                                unpack_fmt = '<I'
+                            else:
+                                continue
+                            
+                            for i in range(0, indices_accessor.count, 3):
+                                if i + 2 < indices_accessor.count:
+                                    offset0 = indices_byte_offset + i * index_size
+                                    offset1 = indices_byte_offset + (i+1) * index_size
+                                    offset2 = indices_byte_offset + (i+2) * index_size
+                                    
+                                    if offset2 + index_size <= len(binary_data):
+                                        idx0, = struct.unpack(unpack_fmt, binary_data[offset0:offset0+index_size])
+                                        idx1, = struct.unpack(unpack_fmt, binary_data[offset1:offset1+index_size])
+                                        idx2, = struct.unpack(unpack_fmt, binary_data[offset2:offset2+index_size])
+                                        faces.append([idx0, idx1, idx2])
+                        
+                        if vertices:
+                            buildings.append({
+                                'vertices': vertices,
+                                'faces': faces,
+                                'batch_id': None  # Will be set from batch table if available
+                            })
+        
+        
+        for scene in scenes_to_process:
+            for node_idx in (scene.nodes if scene.nodes else []):
+                node = gltf.nodes[node_idx]
+                if node.mesh is not None:
+                    mesh = gltf.meshes[node.mesh]
+                    for primitive in mesh.primitives:
+                        # Get accessor indices - attributes is an Attributes object, not a dict
+                        position_accessor_idx = None
+                        if hasattr(primitive.attributes, 'POSITION'):
+                            position_accessor_idx = primitive.attributes.POSITION
+                        indices_accessor_idx = primitive.indices
+                        
+                        if position_accessor_idx is None:
+                            continue
+                        
+                        # Extract vertices
+                        if position_accessor_idx >= len(gltf.accessors):
+                            continue
+                        position_accessor = gltf.accessors[position_accessor_idx]
+                        buffer_view_idx = position_accessor.bufferView
+                        if buffer_view_idx is None or buffer_view_idx >= len(gltf.bufferViews):
+                            continue
+                        buffer_view = gltf.bufferViews[buffer_view_idx]
+                        
+                        # Extract vertex positions from binary data
+                        byte_offset = (buffer_view.byteOffset or 0) + (position_accessor.byteOffset or 0)
+                        byte_stride = buffer_view.byteStride or (3 * 4)  # 3 floats * 4 bytes
+                        count = position_accessor.count
+                        
+                        vertices = []
+                        for i in range(count):
+                            offset = byte_offset + i * byte_stride
+                            if offset + 12 <= len(binary_data):
+                                x, y, z = struct.unpack('<fff', binary_data[offset:offset+12])
+                                vertices.append([x, y, z])
+                        
+                        # Extract face indices
+                        faces = []
+                        if indices_accessor_idx is not None:
+                            if indices_accessor_idx >= len(gltf.accessors):
+                                continue
+                            indices_accessor = gltf.accessors[indices_accessor_idx]
+                            indices_buffer_view_idx = indices_accessor.bufferView
+                            if indices_buffer_view_idx is None or indices_buffer_view_idx >= len(gltf.bufferViews):
+                                continue
+                            indices_buffer_view = gltf.bufferViews[indices_buffer_view_idx]
+                            
+                            indices_byte_offset = (indices_buffer_view.byteOffset or 0) + (indices_accessor.byteOffset or 0)
+                            
+                            # Determine index type
+                            if indices_accessor.componentType == 5123:  # UNSIGNED_SHORT
+                                index_size = 2
+                                unpack_fmt = '<H'
+                            elif indices_accessor.componentType == 5125:  # UNSIGNED_INT
+                                index_size = 4
+                                unpack_fmt = '<I'
+                            else:
+                                continue
+                            
+                            for i in range(0, indices_accessor.count, 3):
+                                if i + 2 < indices_accessor.count:
+                                    offset0 = indices_byte_offset + i * index_size
+                                    offset1 = indices_byte_offset + (i+1) * index_size
+                                    offset2 = indices_byte_offset + (i+2) * index_size
+                                    
+                                    if offset2 + index_size <= len(binary_data):
+                                        idx0, = struct.unpack(unpack_fmt, binary_data[offset0:offset0+index_size])
+                                        idx1, = struct.unpack(unpack_fmt, binary_data[offset1:offset1+index_size])
+                                        idx2, = struct.unpack(unpack_fmt, binary_data[offset2:offset2+index_size])
+                                        faces.append([idx0, idx1, idx2])
+                        
+                        if vertices:
+                            buildings.append({
+                                'vertices': vertices,
+                                'faces': faces,
+                                'batch_id': None  # Will be set from batch table if available
+                            })
+        
+        return buildings
+    except Exception as e:
+        print(f"    Error parsing GLB: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def transform_tile_to_lv95(vertices, tile_transform, region):
+    """
+    Transform vertices from tile-local coordinates to EPSG:2056 (Swiss LV95).
+    
+    tile_transform: 4x4 transformation matrix (if available)
+    region: [west, south, east, north, min_height, max_height] in radians
+    """
+    if not vertices:
+        return []
+    
+    # Extract region bounds
+    west, south, east, north, min_h, max_h = region
+    
+    # Convert region to degrees
+    west_deg = math.degrees(west)
+    south_deg = math.degrees(south)
+    east_deg = math.degrees(east)
+    north_deg = math.degrees(north)
+    
+    # Calculate center of region
+    center_lon = (west_deg + east_deg) / 2
+    center_lat = (south_deg + north_deg) / 2
+    
+    # Transform center to EPSG:2056
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
+    center_x, center_y = transformer.transform(center_lon, center_lat)
+    
+    # Transform vertices from local tile coordinates to EPSG:2056
+    # In b3dm tiles, vertices are typically in ECEF or local tile coordinates
+    # We need to map them to the tile's region bounds
+    
+    # Get region corners in EPSG:2056
+    sw_x, sw_y = transformer.transform(west_deg, south_deg)
+    ne_x, ne_y = transformer.transform(east_deg, north_deg)
+    nw_x, nw_y = transformer.transform(west_deg, north_deg)
+    se_x, se_y = transformer.transform(east_deg, south_deg)
+    
+    # Calculate region dimensions in meters
+    region_width_m = abs(ne_x - nw_x)  # Width in X direction (east-west)
+    region_height_m = abs(ne_y - se_y)  # Height in Y direction (north-south)
+    
+    # Get vertex coordinate ranges
+    x_coords = [v[0] for v in vertices]
+    y_coords = [v[1] for v in vertices]
+    vertex_min_x, vertex_max_x = min(x_coords), max(x_coords)
+    vertex_min_y, vertex_max_y = min(y_coords), max(y_coords)
+    vertex_range_x = vertex_max_x - vertex_min_x if vertex_max_x != vertex_min_x else 1.0
+    vertex_range_y = vertex_max_y - vertex_min_y if vertex_max_y != vertex_min_y else 1.0
+    
+    # Calculate scale factors: region size / vertex range
+    # This maps vertex coordinates to meters
+    scale_x = region_width_m / vertex_range_x if vertex_range_x > 0.001 else 1.0
+    scale_y = region_height_m / vertex_range_y if vertex_range_y > 0.001 else 1.0
+    
+    # Use southwest corner as origin
+    tile_origin_x = sw_x
+    tile_origin_y = sw_y
+    
+    # Transform vertices: map from local tile space to EPSG:2056
+    transformed_vertices = []
+    for v in vertices:
+        # Calculate relative position within vertex bounding box
+        rel_x = v[0] - vertex_min_x
+        rel_y = v[1] - vertex_min_y
+        
+        # Scale to world coordinates and add to tile origin
+        world_x = tile_origin_x + (rel_x * scale_x)
+        world_y = tile_origin_y + (rel_y * scale_y)
+        world_z = v[2]  # Height (add region min_height if needed)
+        
+        transformed_vertices.append([world_x, world_y, world_z])
+    
+    return transformed_vertices
+
+
+def meshes_to_geojson(building_meshes, building_attributes=None):
+    """
+    Convert 3D building meshes to GeoJSON format compatible with existing code.
+    Returns list of building dicts with geometry_json, geometry, attributes.
+    """
+    buildings = []
+    
+    for idx, mesh in enumerate(building_meshes):
+        vertices = mesh.get('vertices', [])
+        faces = mesh.get('faces', [])
+        
+        if not vertices:
+            continue
+        
+        x_coords = [v[0] for v in vertices]
+        y_coords = [v[1] for v in vertices]
+        z_coords = [v[2] for v in vertices]
+        
+        min_x, max_x = min(x_coords), max(x_coords)
+        min_y, max_y = min(y_coords), max(y_coords)
+        min_z, max_z = min(z_coords), max(z_coords)
+        
+        # Try to extract footprint from lowest Z faces
+        footprint_points = []
+        if faces:
+            # Find faces at or near minimum Z (footprint level)
+            tolerance = (max_z - min_z) * 0.1  # 10% of height
+            footprint_faces = []
+            for face in faces:
+                if len(face) == 3:
+                    v0, v1, v2 = vertices[face[0]], vertices[face[1]], vertices[face[2]]
+                    avg_z = (v0[2] + v1[2] + v2[2]) / 3.0
+                    if avg_z <= min_z + tolerance:
+                        footprint_faces.append(face)
+            
+            # Extract unique points from footprint faces
+            footprint_vertex_indices = set()
+            for face in footprint_faces:
+                footprint_vertex_indices.update(face)
+            
+            # Get 2D points (x, y) from footprint vertices
+            footprint_2d_points = []
+            for vi in footprint_vertex_indices:
+                if vi < len(vertices):
+                    v = vertices[vi]
+                    footprint_2d_points.append((v[0], v[1]))
+            
+            # Create convex hull or bounding polygon
+            if len(footprint_2d_points) >= 3:
+                try:
+                    from shapely.geometry import MultiPoint
+                    points = MultiPoint(footprint_2d_points)
+                    hull = points.convex_hull
+                    if hull.geom_type == 'Polygon':
+                        footprint_coords_2d = list(hull.exterior.coords)
+                    else:
+                        footprint_coords_2d = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
+                except:
+                    footprint_coords_2d = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
+            else:
+                footprint_coords_2d = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
+        else:
+            # No faces - use bounding box
+            footprint_coords_2d = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
+        
+        # Create 3D footprint coordinates
+        footprint_coords = [[x, y, min_z] for x, y in footprint_coords_2d]
+        footprint_coords.append(footprint_coords[0])  # Close ring
+        
+        # Create GeoJSON MultiPolygon with 3D coordinates
+        geometry_json = {
+            "type": "MultiPolygon",
+            "coordinates": [[footprint_coords]]
+        }
+        
+        # Create Shapely geometry (2D for compatibility)
+        try:
+            geom_shape = Polygon(footprint_coords_2d)
+            if not geom_shape.is_valid:
+                geom_shape = geom_shape.buffer(0)
+        except:
+            # Fallback to bounding box
+            geom_shape = Polygon([
+                (min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)
+            ])
+        
+        attrs = building_attributes[idx] if building_attributes and idx < len(building_attributes) else {}
+        if 'height' not in attrs:
+            attrs['height'] = max_z - min_z if max_z > min_z else 10.0
+        
+        buildings.append({
+            "geometry": geom_shape,
+            "geometry_json": geometry_json,
+            "attributes": attrs,
+            "layer": "ch.swisstopo.swissbuildings3d_3_0",
+            "has_z": True,
+            "min_z": min_z,
+            "max_z": max_z
+        })
+    
+    return buildings
+
+
+def download_and_parse_b3dm(tile_url):
+    """
+    Download b3dm tile and extract building geometries.
+    Returns list of building meshes.
+    """
+    try:
+        response = requests.get(tile_url, timeout=60)
+        response.raise_for_status()
+        b3dm_data = response.content
+        
+        # Parse b3dm header
+        header = parse_b3dm_header(b3dm_data)
+        if not header:
+            return []
+        
+        # Parse feature table
+        feature_table = {}
+        if header['feature_table_json']:
+            try:
+                feature_table = json.loads(header['feature_table_json'].decode('utf-8'))
+            except:
+                pass
+        
+        # Parse batch table for building IDs
+        batch_table = {}
+        if header['batch_table_json']:
+            try:
+                batch_table = json.loads(header['batch_table_json'].decode('utf-8'))
+            except:
+                pass
+        
+        # Parse GLB geometries
+        glb_data = header['glb_data']
+        meshes = parse_glb_geometries(glb_data)
+        
+        # Attach batch IDs if available
+        if batch_table and 'id' in batch_table:
+            ids = batch_table['id']
+            for i, mesh in enumerate(meshes):
+                if i < len(ids):
+                    mesh['batch_id'] = ids[i]
+        
+        return meshes, feature_table, batch_table
+    except Exception as e:
+        print(f"    Error downloading/parsing b3dm: {e}")
+        return [], {}, {}
+
+
+def fetch_buildings_from_3d_tiles(center_x, center_y, radius, max_buildings=250):
+    """
+    Fetch swissBUILDINGS3D 3.0 Beta buildings from 3D Tiles service.
+    Returns list of building dicts compatible with existing code.
+    """
+    if pygltflib is None:
+        print("  Error: pygltflib not installed. Cannot parse 3D Tiles.")
+        print("  Install with: pip install pygltflib")
+        return []
+    
+    print(f"  Fetching buildings from 3D Tiles service...")
+    
+    base_url = "https://3d.geo.admin.ch/ch.swisstopo.swissbuildings3d.3d/v1"
+    bbox_lv95 = (
+        center_x - radius,
+        center_y - radius,
+        center_x + radius,
+        center_y + radius,
+    )
+    
+    # Fetch root tileset
+    tileset = fetch_and_parse_tileset(base_url)
+    if not tileset:
+        print("  Failed to fetch root tileset")
+        return []
+    
+    # Find date-based tileset that covers our area
+    date_tileset = None
+    date_str = None
+    root_node = tileset.get('root', {})
+    
+    # Transform center to WGS84 for region comparison
+    transformer = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
+    center_lon, center_lat = transformer.transform(center_x, center_y)
+    west_rad = math.radians(center_lon - 0.01)
+    east_rad = math.radians(center_lon + 0.01)
+    south_rad = math.radians(center_lat - 0.01)
+    north_rad = math.radians(center_lat + 0.01)
+    
+    # Get date string from root children (but don't use that tileset - it's just the root)
+    if 'children' in root_node:
+        for child in root_node['children']:
+            if 'content' in child and 'uri' in child.get('content', {}):
+                uri = child['content']['uri']
+                if uri.endswith('tileset.json'):
+                    # Extract date from URI (format: YYYYMMDD/tileset.json)
+                    date_str = uri.replace('/tileset.json', '')
+                    if date_str.isdigit() and len(date_str) == 8:
+                        break
+    
+    if not date_str:
+        date_str = "20251121"  # Default to most recent
+    
+    # Fallback: try to find tileset by number (0-20) that covers our area
+    if not date_tileset:
+        # First, get the date string if available
+        if not date_str:
+            # Try to get date from root children
+            if 'children' in root_node:
+                for child in root_node['children']:
+                    if 'content' in child and 'uri' in child.get('content', {}):
+                        uri = child['content']['uri']
+                        if uri.endswith('tileset.json'):
+                            date_str = uri.replace('/tileset.json', '')
+                            if date_str.isdigit() and len(date_str) == 8:
+                                break
+        
+        if not date_str:
+            date_str = "20251121"  # Default to most recent
+        
+        # Now check each tileset number - fetch directly
+        for tileset_num in range(0, 20):
+            try:
+                tileset_url = f"{base_url}/{date_str}/tileset{tileset_num}.json"
+                import requests
+                response = requests.get(tileset_url, timeout=10)
+                if response.status_code == 200:
+                    test_tileset = response.json()
+                    root = test_tileset.get('root', {})
+                    if 'boundingVolume' in root and 'region' in root['boundingVolume']:
+                        region = root['boundingVolume']['region']
+                        tile_west, tile_south, tile_east, tile_north = region[0], region[1], region[2], region[3]
+                        if not (tile_east < west_rad or tile_west > east_rad or tile_north < south_rad or tile_south > north_rad):
+                            date_tileset = test_tileset
+                            print(f"  Using tileset{tileset_num} (covers our area)")
+                            break
+            except Exception as e:
+                continue
+    
+    # Final fallback to root tileset
+    if not date_tileset:
+        date_tileset = tileset
+        date_str = None
+    
+    # Traverse tileset to find relevant tiles
+    all_buildings = []
+    tiles_to_download = []
+    tileset_cache = {}  # Cache fetched tilesets
+    
+    def traverse_tileset(node, tileset_base_url=None, depth=0, max_depth=15, visited=None):
+        if visited is None:
+            visited = set()
+        if depth > max_depth:
+            return
+        
+        # Check bounding volume intersection
+        # Only include nodes that actually intersect our search area
+        should_include = True
+        if 'boundingVolume' in node:
+            bv = node['boundingVolume']
+            if 'region' in bv:
+                region = bv['region']
+                # Use buffer to include nearby tiles (radius * 2 to be safe)
+                intersects = _bbox_intersects_region(bbox_lv95, region, buffer_meters=radius * 2)
+                if not intersects:
+                    # Skip this node - it doesn't intersect
+                    # But still traverse children in case they do
+                    should_include = False
+                    # Don't return - continue to check children
+        
+        # Process content - temporarily include all to debug
+        if 'content' in node:
+            content = node['content']
+            uri = None
+            if isinstance(content, dict) and 'uri' in content:
+                uri = content['uri']
+            elif isinstance(content, str):
+                uri = content
+            
+            if uri:
+                if '.b3dm' in uri or uri.endswith('.b3dm'):
+                    # Found a b3dm tile
+                    region = node.get('boundingVolume', {}).get('region') if 'boundingVolume' in node else None
+                    tiles_to_download.append((uri, region, tileset_base_url))
+                    if len(tiles_to_download) <= 5:  # Debug: show first few tiles
+                        print(f"      Found tile: {uri}")
+                elif 'tileset' in uri.lower() and uri not in visited:
+                    # Found a nested tileset - fetch and traverse it
+                    visited.add(uri)
+                    
+                    # Construct nested tileset URL
+                    if tileset_base_url:
+                        if uri.startswith('/'):
+                            nested_full_url = f"{base_url}{uri}"
+                        else:
+                            nested_full_url = f"{tileset_base_url}/{uri}"
+                    else:
+                        if uri.startswith('/'):
+                            nested_full_url = f"{base_url}{uri}"
+                        else:
+                            nested_full_url = f"{base_url}/{uri}"
+                    
+                    # Ensure URL ends with tileset.json for fetch_and_parse_tileset
+                    if not nested_full_url.endswith('tileset.json'):
+                        if nested_full_url.endswith('/'):
+                            nested_full_url = nested_full_url + 'tileset.json'
+                        else:
+                            nested_full_url = nested_full_url + '/tileset.json'
+                    
+                    # Extract base URL for child tiles (directory containing tileset.json)
+                    nested_base_for_tiles = nested_full_url.rsplit('/', 1)[0] if '/' in nested_full_url else tileset_base_url
+                    
+                    # Avoid infinite recursion
+                    cache_key = nested_full_url
+                    if cache_key not in tileset_cache:
+                        nested_tileset = fetch_and_parse_tileset(nested_full_url)
+                        if nested_tileset:
+                            tileset_cache[cache_key] = nested_tileset
+                            nested_root = nested_tileset.get('root', {})
+                            traverse_tileset(nested_root, nested_base_for_tiles, depth + 1, max_depth, visited)
+        
+        # Always traverse children (they might intersect even if parent doesn't)
+        if 'children' in node:
+            for child in node['children']:
+                traverse_tileset(child, tileset_base_url, depth + 1, max_depth, visited)
+        
+        # Debug: show traversal progress at top levels
+        if depth <= 2 and 'boundingVolume' in node:
+            bv = node['boundingVolume']
+            if 'region' in bv:
+                region = bv['region']
+                intersects = _bbox_intersects_region(bbox_lv95, region, buffer_meters=radius * 2)
+                if depth == 0:
+                    print(f"    Root node: intersects={intersects}")
+    
+    root_node = date_tileset.get('root', {})
+    # Determine base URL for relative URIs
+    # date_str was already extracted above
+    if date_str:
+        date_base_url = f"{base_url}/{date_str}"
+    else:
+        date_base_url = base_url
+    
+    traverse_tileset(root_node, date_base_url)
+    
+    print(f"  Found {len(tiles_to_download)} tiles to download")
+    
+    if not tiles_to_download:
+        print("  No tiles found in tileset hierarchy")
+        return []
+    
+    # Sort tiles by distance to center (approximate) and download closest ones first
+    # Calculate approximate distance for each tile based on its region
+    tile_distances = []
+    for tile_info in tiles_to_download:
+        if len(tile_info) >= 2 and tile_info[1]:  # Has region
+            region = tile_info[1]
+            if len(region) >= 4:
+                west, south, east, north = region[0], region[1], region[2], region[3]
+                # Transform region center to EPSG:2056
+                transformer = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
+                center_lon = math.degrees((west + east) / 2)
+                center_lat = math.degrees((south + north) / 2)
+                tile_x, tile_y = transformer.transform(center_lon, center_lat)
+                dist = ((tile_x - center_x)**2 + (tile_y - center_y)**2)**0.5
+                tile_distances.append((dist, tile_info))
+            else:
+                tile_distances.append((float('inf'), tile_info))
+        else:
+            tile_distances.append((float('inf'), tile_info))
+    
+    # Sort by distance and take closest tiles
+    tile_distances.sort(key=lambda x: x[0])
+    
+    # Download and parse tiles (limit for performance)
+    max_tiles = 50  # Increased limit to get more buildings
+    print(f"  Downloading up to {max_tiles} closest tiles (out of {len(tiles_to_download)} total)")
+    for dist, tile_info in tile_distances[:max_tiles]:
+        # Handle tuple format: (uri, region, base_url) or (uri, region)
+        if len(tile_info) == 3:
+            tile_uri, region, tile_base_url = tile_info
+        else:
+            tile_uri, region = tile_info
+            tile_base_url = base_url
+        
+        # Handle relative and absolute URIs
+        if tile_uri.startswith('http'):
+            tile_url = tile_uri
+        else:
+            # Construct full URL using the base URL from tileset
+            if tile_base_url:
+                tile_url = f"{tile_base_url}/{tile_uri}"
+            else:
+                tile_url = f"{base_url}/{tile_uri}"
+        
+        print(f"    Downloading tile: {tile_uri}")
+        result = download_and_parse_b3dm(tile_url)
+        
+        if isinstance(result, tuple) and len(result) == 3:
+            meshes, feature_table, batch_table = result
+        else:
+            meshes, feature_table, batch_table = result, {}, {}
+        
+        if meshes and len(meshes) > 0:
+            print(f"      Parsed {len(meshes)} meshes from tile")
+            # Transform coordinates
+            transformed_meshes = []
+            for mesh in meshes:
+                vertices = mesh.get('vertices', [])
+                if not vertices:
+                    print(f"        Mesh has no vertices")
+                    continue
+                    
+                print(f"        Mesh has {len(vertices)} vertices, {len(mesh.get('faces', []))} faces")
+                
+                if region:
+                    # Debug: show region and vertex ranges
+                    if len(transformed_meshes) == 0:  # Only print for first mesh
+                        x_coords = [v[0] for v in vertices]
+                        y_coords = [v[1] for v in vertices]
+                        print(f"        Vertex range: X=[{min(x_coords):.2f}, {max(x_coords):.2f}], Y=[{min(y_coords):.2f}, {max(y_coords):.2f}]")
+                        print(f"        Region: {region[:4] if len(region) >= 4 else 'N/A'}")
+                    
+                    transformed_vertices = transform_tile_to_lv95(vertices, None, region)
+                    
+                    # Debug: show transformed range
+                    if len(transformed_meshes) == 0 and transformed_vertices:
+                        tx_coords = [v[0] for v in transformed_vertices]
+                        ty_coords = [v[1] for v in transformed_vertices]
+                        print(f"        Transformed range: X=[{min(tx_coords):.2f}, {max(tx_coords):.2f}], Y=[{min(ty_coords):.2f}, {max(ty_coords):.2f}]")
+                else:
+                    # Use vertices as-is if no region (they should already be in correct CRS)
+                    transformed_vertices = vertices
+                
+                if transformed_vertices and len(transformed_vertices) > 0:
+                    transformed_mesh = mesh.copy()
+                    transformed_mesh['vertices'] = transformed_vertices
+                    transformed_meshes.append(transformed_mesh)
+            
+            print(f"      Transformed {len(transformed_meshes)} meshes")
+            
+            if transformed_meshes:
+                # Convert to GeoJSON
+                building_attrs = []
+                if batch_table and isinstance(batch_table, dict):
+                    if 'id' in batch_table:
+                        ids = batch_table['id']
+                        if isinstance(ids, list):
+                            building_attrs = [{'egid': str(id)} for id in ids]
+                
+                buildings = meshes_to_geojson(transformed_meshes, building_attrs if building_attrs else None)
+                print(f"      Converted to {len(buildings)} buildings")
+                
+                # Filter by radius
+                circle = Point(center_x, center_y).buffer(radius)
+                print(f"      Filtering buildings within {radius}m of ({center_x}, {center_y})")
+                for idx, building in enumerate(buildings):
+                    geom = building.get('geometry')
+                    if not geom:
+                        print(f"        Building {idx}: No geometry!")
+                        continue
+                    
+                    # Get centroid for debug
+                    try:
+                        centroid = geom.centroid
+                        dist = Point(center_x, center_y).distance(centroid)
+                        print(f"        Building {idx}: centroid=({centroid.x:.1f}, {centroid.y:.1f}), distance={dist:.1f}m", end="")
+                        
+                        # Check if geometry intersects circle
+                        if circle.intersects(geom):
+                            print(" - INCLUDED")
+                            all_buildings.append(building)
+                            if len(all_buildings) >= max_buildings:
+                                break
+                        else:
+                            print(" - OUTSIDE")
+                    except Exception as e:
+                        print(f"        Building {idx}: Error getting centroid: {e}")
+        
+        if len(all_buildings) >= max_buildings:
+            break
+    
+    print(f"  Extracted {len(all_buildings)} buildings from 3D Tiles")
+    return all_buildings
+
+
 def fetch_buildings_in_radius(center_x, center_y, radius, layer="ch.swisstopo.swissbuildings3d_3_0", max_buildings=250):
     """
     Fetch swissBUILDINGS3D 3.0 Beta features in a circular search area.
+    
+    Note: swissBUILDINGS3D 3.0 Beta may not be available via REST API.
+    The data is primarily available via download from swisstopo.
+    This function attempts API access but may return empty results.
     """
     bbox = (
         center_x - radius,
@@ -252,14 +1395,22 @@ def fetch_buildings_in_radius(center_x, center_y, radius, layer="ch.swisstopo.sw
         center_x + radius,
         center_y + radius,
     )
-    url = "https://api3.geo.admin.ch/rest/services/all/MapServer/identify"
     circle = Point(center_x, center_y).buffer(radius)
-
-    def _query_bbox(bounds):
+    
+    # Try alternative layer names (including fallback to VEC200 buildings)
+    alternative_layers = [
+        layer,  # Original: ch.swisstopo.swissbuildings3d_3_0
+        "ch.swisstopo.swissbuildings3d.3d",  # Alternative format
+        "ch.swisstopo.swissbuildings3d",  # Without version
+        "ch.swisstopo.vec200-building",  # Fallback: VEC200 buildings (2D footprints, available via API)
+    ]
+    
+    def _query_bbox(bounds, try_layer):
+        """Query identify endpoint"""
         params = {
             "geometry": f"{bounds[0]},{bounds[1]},{bounds[2]},{bounds[3]}",
             "geometryType": "esriGeometryEnvelope",
-            "layers": f"all:{layer}",
+            "layers": f"all:{try_layer}",
             "tolerance": 0,
             "returnGeometry": "true",
             "sr": "2056",
@@ -267,9 +1418,18 @@ def fetch_buildings_in_radius(center_x, center_y, radius, layer="ch.swisstopo.sw
             "imageDisplay": "1000,1000,96",
             "geometryFormat": "geojson",
         }
-        response = requests.get(url, params=params, timeout=25)
-        response.raise_for_status()
-        return response.json().get("results", [])
+        url = "https://api3.geo.admin.ch/rest/services/all/MapServer/identify"
+        try:
+            response = requests.get(url, params=params, timeout=25)
+            response.raise_for_status()
+            return response.json().get("results", [])
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 400:
+                error_data = e.response.json()
+                error_detail = error_data.get("detail", "")
+                if "No GeoTable" in error_detail or "No Vector Table" in error_detail or "error in the parameter layers" in error_detail:
+                    return None  # Signal that this layer doesn't work
+            raise
 
     def _split_bbox(bounds):
         minx, miny, maxx, maxy = bounds
@@ -297,14 +1457,55 @@ def fetch_buildings_in_radius(center_x, center_y, radius, layer="ch.swisstopo.sw
             or feature.get("value")
         )
 
+    # Find working layer name
+    working_layer = None
+    for alt_layer in alternative_layers:
+        try:
+            test_results = _query_bbox(bbox, alt_layer)
+            if test_results is not None:  # None means layer doesn't exist, [] means no results
+                working_layer = alt_layer
+                if alt_layer != layer:
+                    print(f"  Using alternative layer name: {alt_layer}")
+                break
+        except Exception:
+            continue
+    
+    if working_layer is None:
+        print(f"  ⚠️  swissBUILDINGS3D 3.0 Beta is NOT available via GeoAdmin REST API")
+        print(f"  Falling back to 3D Tiles service...")
+        
+        # Try 3D Tiles as fallback
+        try:
+            buildings_3d_tiles = fetch_buildings_from_3d_tiles(center_x, center_y, radius, max_buildings)
+            if buildings_3d_tiles:
+                print(f"  ✓ Successfully fetched {len(buildings_3d_tiles)} buildings from 3D Tiles")
+                return buildings_3d_tiles
+            else:
+                print(f"  No buildings found via 3D Tiles service")
+                return []
+        except Exception as e:
+            print(f"  Error fetching from 3D Tiles: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"  NOTE: No buildings will be included in the IFC file")
+            return []
+    
+    if working_layer == "ch.swisstopo.vec200-building":
+        print(f"  NOTE: Using VEC200 building footprints (2D) as fallback")
+        print(f"  These are 2D footprints without 3D geometry - will be extruded based on terrain")
+    
     def _collect_from_bbox(bounds, depth=0, max_depth=4):
         nonlocal collected
         if max_buildings and len(collected) >= max_buildings:
             return
+        
         try:
-            results = _query_bbox(bounds)
+            results = _query_bbox(bounds, working_layer)
+            if results is None:
+                return  # Layer doesn't exist
         except Exception as exc:
-            print(f"  Warning: Failed bbox fetch {bounds}: {exc}")
+            if depth == 0:
+                print(f"  Warning: Failed bbox fetch {bounds}: {exc}")
             return
 
         if len(results) >= 50 and depth < max_depth:
