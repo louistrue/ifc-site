@@ -188,7 +188,7 @@ def create_cadastral_ifc(gdf_3d, output_path, offset_x=0.0, offset_y=0.0, offset
     footprint_context = ifcopenshell.api.run(
         "context.add_context",
         model,
-        context_type="Plan",
+        context_type="Model",
         context_identifier="FootPrint",
         target_view="PLAN_VIEW",
         parent=context,
