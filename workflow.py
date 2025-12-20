@@ -2,12 +2,48 @@ import geopandas as gpd
 import rasterio
 import numpy as np
 from shapely.geometry import Polygon, shape
+from shapely.geometry.polygon import orient
+from shapely.ops import triangulate
 import ifcopenshell
 import ifcopenshell.api
 import argparse
 import os
 import requests
 import json
+
+def _circular_mean(values, window_size):
+    """Smooth values with a circular mean filter."""
+    n = len(values)
+    if n == 0:
+        return []
+
+    window_size = min(window_size, n)
+    if window_size % 2 == 0:
+        window_size -= 1
+    if window_size < 1:
+        window_size = 1
+
+    half_window = window_size // 2
+    smoothed = []
+    for i in range(n):
+        window = [values[(i + j) % n] for j in range(-half_window, half_window + 1)]
+        smoothed.append(float(np.mean(window)))
+    return smoothed
+
+def _best_fit_plane(ext_coords):
+    """Project coordinates onto a best-fit plane to flatten bumps while keeping tilt."""
+    if len(ext_coords) < 3:
+        return [c[2] for c in ext_coords]
+
+    arr = np.array(ext_coords, dtype=float)
+    A = np.column_stack((arr[:, 0], arr[:, 1], np.ones(len(arr))))
+    try:
+        coeffs, _, _, _ = np.linalg.lstsq(A, arr[:, 2], rcond=None)
+    except np.linalg.LinAlgError:
+        return [c[2] for c in ext_coords]
+
+    plane_z = A @ coeffs
+    return plane_z.tolist()
 
 def fetch_boundary_by_egrid(egrid):
     """
@@ -175,6 +211,8 @@ def create_cadastral_ifc(gdf_3d, output_path, offset_x=0.0, offset_y=0.0, offset
         site = ifcopenshell.api.run("root.create_entity", model,
                                      ifc_class="IfcSite", 
                                      name=str(name))
+        # Aggregate site to project for proper spatial hierarchy
+        ifcopenshell.api.run("aggregate.assign_object", model, products=[site], relating_object=project)
         
         # 1. Keep PolyLine Footprint on Site for visibility (what the user liked)
         coords = [(float(x - offset_x), float(y - offset_y), float(z - offset_z)) 
@@ -206,26 +244,50 @@ def create_cadastral_ifc(gdf_3d, output_path, offset_x=0.0, offset_y=0.0, offset
         if ext_coords[0] == ext_coords[-1]:
             ext_coords = ext_coords[:-1]
             
-        # Apply median filter to smooth Z-coordinates of the solid terrain
-        window_size = 5
-        half_window = window_size // 2
+        # Apply aggressive smoothing: fit plane for tilt, then heavily damp residual bumps
         z_values = [c[2] for c in ext_coords]
-        smoothed_z = []
-        n = len(z_values)
-        for i in range(n):
-            # Use wrap-around for the closed loop
-            window = [z_values[(i + j) % n] for j in range(-half_window, half_window + 1)]
-            smoothed_z.append(float(np.median(window)))
-        ext_coords = [(ext_coords[i][0], ext_coords[i][1], smoothed_z[i]) for i in range(n)]
+        plane_z = _best_fit_plane(ext_coords)
+
+    # Smooth raw heights and residuals separately to kill small bumps
+        smoothed_z = _circular_mean(z_values, window_size=9)
+        residuals = [sz - pz for sz, pz in zip(smoothed_z, plane_z)]
+        smoothed_residuals = _circular_mean(residuals, window_size=9)
+
+        # Heavily attenuate residuals so the top stays flat but keeps overall orientation
+        residual_scale = 0.2
+        flattened_z = [pz + residual_scale * rz for pz, rz in zip(plane_z, smoothed_residuals)]
+
+        ext_coords = [(ext_coords[i][0], ext_coords[i][1], flattened_z[i]) for i in range(len(ext_coords))]
             
         base_elevation = min(z for _, _, z in ext_coords) - 2.0 # 2 meters below lowest point
         
-        # Create the top face
-        top_points = [model.createIfcCartesianPoint(list(c)) for c in ext_coords]
-        top_loop = model.createIfcPolyLoop(top_points)
-        top_face = model.createIfcFace([model.createIfcFaceOuterBound(top_loop, True)])
-        
-        faces = [top_face]
+        # Create triangulated top faces to handle non-planar geometry
+        polygon_2d = Polygon([(x, y) for x, y, _ in ext_coords])
+        if not polygon_2d.is_valid:
+            polygon_2d = polygon_2d.buffer(0)
+        if polygon_2d.is_empty:
+            print(f"Warning: invalid footprint for {name}, skipping geometry.")
+            continue
+
+        z_lookup = {(round(x, 6), round(y, 6)): z for x, y, z in ext_coords}
+
+        def get_vertex_z(x, y):
+            key = (round(x, 6), round(y, 6))
+            if key in z_lookup:
+                return z_lookup[key]
+            return min(ext_coords, key=lambda p: (p[0] - x) ** 2 + (p[1] - y) ** 2)[2]
+
+        faces = []
+
+        for tri in triangulate(polygon_2d):
+            oriented_tri = orient(tri, sign=1.0)
+            tri_coords = list(oriented_tri.exterior.coords)[:-1]  # drop closing vertex
+            tri_points = [
+                model.createIfcCartesianPoint([float(x), float(y), float(get_vertex_z(x, y))])
+                for x, y in tri_coords
+            ]
+            tri_loop = model.createIfcPolyLoop(tri_points)
+            faces.append(model.createIfcFace([model.createIfcFaceOuterBound(tri_loop, True)]))
         
         # Create side faces (the "skirt")
         for i in range(len(ext_coords)):
