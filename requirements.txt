@@ -5,3 +5,5 @@ numpy
 pyproj>=3.0.0
 ifcopenshell
 requests
+fastapi
+uvicorn

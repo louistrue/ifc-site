@@ -59,15 +59,15 @@ python combined_terrain.py --egrid CH999979659148 --radius 500 --output combined
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--egrid` | EGRID number to fetch boundary for | Required* |
-| `--center-x` | Center easting (EPSG:2056) if no EGRID | - |
-| `--center-y` | Center northing (EPSG:2056) if no EGRID | - |
+| `--center-x` | Optional override for center easting (EPSG:2056) | Parcel centroid |
+| `--center-y` | Optional override for center northing (EPSG:2056) | Parcel centroid |
 | `--radius` | Radius of circular terrain area (meters) | `500` |
 | `--resolution` | Grid resolution in meters (lower = more detail) | `10` |
 | `--densify` | Site boundary densification interval (meters) | `0.5` |
 | `--attach-to-solid` | Attach terrain to smoothed site solid edges (less bumpy) | False |
 | `--output` | Output IFC file path | `combined_terrain.ifc` |
 
-*Either `--egrid` or both `--center-x` and `--center-y` must be provided.
+*EGRID is required for combined terrain generation; center coordinates can override the automatically derived parcel centroid.
 
 #### Examples
 
@@ -328,6 +328,72 @@ The generated IFC files contain:
 - Proper IFC4 structure for BIM applications
 - Comprehensive metadata in standard property sets
 - Compatible with major IFC viewers (BlenderBIM, Solibri, etc.)
+
+## FastAPI Service
+
+A lightweight FastAPI service wraps the combined workflow to generate IFC files over HTTP.
+
+### Installation
+
+Install dependencies (FastAPI and Uvicorn are included in `requirements.txt`):
+```bash
+pip install -r requirements.txt
+```
+
+### Running the service
+
+Start the API with Uvicorn:
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+### Endpoints
+
+- `GET /health` – Service status.
+- `POST /generate` – Generate and stream an IFC file immediately.
+- `POST /jobs` – Start a background generation job and return a `job_id`.
+- `GET /jobs/{job_id}` – Check job status; returns a download link when complete.
+- `GET /jobs/{job_id}/download` – Download the IFC produced by a completed job.
+
+### Request body (POST /generate and POST /jobs)
+
+JSON payload mirrors the CLI flags:
+```json
+{
+  "egrid": "CH999979659148",
+  "radius": 500,
+  "resolution": 10,
+  "densify": 0.5,
+  "attach_to_solid": false,
+  "output_name": "combined_terrain.ifc"
+}
+```
+
+`egrid` is required for combined terrain generation. You can optionally pass `center_x` and `center_y` to override the terrain center while still using the fetched parcel boundary.
+
+### Example requests
+
+**Immediate generation**
+```bash
+curl -X POST http://localhost:8000/generate \
+  -H "Content-Type: application/json" \
+  -o combined.ifc \
+  -d '{"egrid":"CH999979659148","radius":500,"resolution":10}'
+```
+
+**Background job**
+```bash
+# Start the job
+JOB_ID=$(curl -s -X POST http://localhost:8000/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"egrid":"CH999979659148","radius":500,"resolution":10}' | jq -r .job_id)
+
+# Poll for completion
+curl http://localhost:8000/jobs/$JOB_ID
+
+# Download when ready
+curl -o combined.ifc http://localhost:8000/jobs/$JOB_ID/download
+```
 
 ## License
 

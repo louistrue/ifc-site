@@ -740,6 +740,125 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
     return offset_x, offset_y, offset_z
 
 
+def run_combined_terrain_workflow(
+    egrid=None,
+    center_x=None,
+    center_y=None,
+    radius=500.0,
+    resolution=10.0,
+    densify=0.5,
+    attach_to_solid=False,
+    output_path="combined_terrain.ifc",
+):
+    """
+    Run the combined terrain generation workflow using the existing processing pipeline.
+    """
+    if not egrid and not (center_x and center_y):
+        raise ValueError("Either an EGRID or both center_x and center_y must be provided.")
+
+    # Fetch site boundary from cadastre (required for combined workflow)
+    cadastre_metadata = None
+    site_geometry = None
+    if egrid:
+        site_geometry, cadastre_metadata = fetch_boundary_by_egrid(egrid)
+        if site_geometry is None:
+            raise ValueError(f"Failed to fetch site boundary for EGRID {egrid}")
+        centroid = site_geometry.centroid
+        center_x = center_x if center_x is not None else centroid.x
+        center_y = center_y if center_y is not None else centroid.y
+        bounds = site_geometry.bounds
+        print(f"Site bounds: E {bounds[0]:.1f}-{bounds[2]:.1f}, N {bounds[1]:.1f}-{bounds[3]:.1f}")
+        print(f"Site centroid: E {center_x:.1f}, N {center_y:.1f}")
+    else:
+        raise ValueError("Site geometry is required for combined terrain generation; provide an EGRID.")
+
+    # Create terrain grid
+    terrain_coords, circle_bounds = create_circular_terrain_grid(
+        center_x, center_y, radius=radius, resolution=resolution
+    )
+
+    if len(terrain_coords) == 0:
+        raise ValueError("No points generated in circular area.")
+
+    # Fetch terrain elevations
+    print("\nFetching terrain elevations...")
+    terrain_elevations = fetch_elevation_batch(terrain_coords)
+
+    # Get site boundary 3D coordinates
+    ring = site_geometry.exterior
+    distances = np.arange(0, ring.length, densify)
+    if distances[-1] < ring.length:
+        distances = np.append(distances, ring.length)
+
+    site_points = [ring.interpolate(d) for d in distances]
+    site_coords_2d = [(p.x, p.y) for p in site_points]
+
+    print(f"\nFetching site boundary elevations ({len(site_coords_2d)} points)...")
+    site_elevations = fetch_elevation_batch(site_coords_2d)
+    site_coords_3d = [(x, y, z) for (x, y), z in zip(site_coords_2d, site_elevations)]
+
+    # Calculate height offset
+    print("\nCalculating height offset for site solid...")
+    z_offset = calculate_height_offset(
+        site_geometry, site_coords_3d, terrain_coords, terrain_elevations
+    )
+
+    # Prepare site solid data BEFORE triangulation (so we can use smoothed boundary)
+    print("\nPreparing smoothed site solid...")
+    (
+        ext_coords,
+        base_elevation,
+        polygon_2d,
+        smoothed_boundary_2d,
+        smoothed_boundary_z,
+    ) = create_site_solid_coords(
+        site_geometry, site_coords_3d, z_offset_adjustment=z_offset
+    )
+    site_solid_data = {
+        "ext_coords": ext_coords,
+        "base_elevation": base_elevation,
+        "polygon_2d": polygon_2d,
+    }
+    print(f"Site solid prepared with {len(ext_coords)} boundary points")
+
+    # Triangulate terrain with site cutout
+    print("\nTriangulating terrain mesh (excluding site area)...")
+    if attach_to_solid and smoothed_boundary_2d and smoothed_boundary_z:
+        print("  Using smoothed site solid boundary for terrain attachment")
+        boundary_coords = smoothed_boundary_2d
+        boundary_elevations = smoothed_boundary_z
+    else:
+        print("  Using raw API elevations for terrain boundary")
+        boundary_coords = site_coords_2d
+        boundary_elevations = site_elevations
+
+    terrain_triangles = triangulate_terrain_with_cutout(
+        terrain_coords,
+        terrain_elevations,
+        site_geometry,
+        site_boundary_coords=boundary_coords,
+        site_boundary_elevations=boundary_elevations,
+    )
+
+    print(f"Created {len(terrain_triangles)} terrain triangles")
+
+    # Generate combined IFC
+    print("\nGenerating combined IFC file...")
+    create_combined_ifc(
+        terrain_triangles,
+        site_solid_data,
+        output_path,
+        circle_bounds,
+        center_x,
+        center_y,
+        egrid=egrid,
+        cadastre_metadata=cadastre_metadata,
+    )
+
+    print(f"\nSuccess! Combined terrain IFC saved to: {output_path}")
+    return output_path
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Create combined terrain with site cutout"
@@ -760,123 +879,30 @@ def main():
     
     args = parser.parse_args()
     
-    if not args.egrid and not (args.center_x and args.center_y):
-        print("Error: Either --egrid or both --center-x and --center-y must be provided")
-        sys.exit(1)
-    
-    # Fetch site boundary
-    cadastre_metadata = None
-    if args.egrid:
-        site_geometry, cadastre_metadata = fetch_boundary_by_egrid(args.egrid)
-        if site_geometry is None:
-            print("Failed to fetch site boundary")
-            sys.exit(1)
-        centroid = site_geometry.centroid
-        center_x = centroid.x
-        center_y = centroid.y
-        bounds = site_geometry.bounds
-        print(f"Site bounds: E {bounds[0]:.1f}-{bounds[2]:.1f}, N {bounds[1]:.1f}-{bounds[3]:.1f}")
-        print(f"Site centroid: E {center_x:.1f}, N {center_y:.1f}")
-    else:
-        center_x = args.center_x
-        center_y = args.center_y
-        site_geometry = None
-    
-    # Create terrain grid
-    terrain_coords, circle_bounds = create_circular_terrain_grid(
-        center_x, center_y, radius=args.radius, resolution=args.resolution
-    )
-    
-    if len(terrain_coords) == 0:
-        print("Error: No points generated in circular area")
-        sys.exit(1)
-    
-    # Fetch terrain elevations
-    print("\nFetching terrain elevations...")
-    terrain_elevations = fetch_elevation_batch(terrain_coords)
-    
-    # Get site boundary 3D coordinates
-    site_solid_data = None
-    smoothed_boundary_2d = None
-    smoothed_boundary_z = None
-    
-    if site_geometry:
-        from shapely.geometry import LineString
-        ring = site_geometry.exterior
-        distances = np.arange(0, ring.length, args.densify)
-        if distances[-1] < ring.length:
-            distances = np.append(distances, ring.length)
-        
-        site_points = [ring.interpolate(d) for d in distances]
-        site_coords_2d = [(p.x, p.y) for p in site_points]
-        
-        print(f"\nFetching site boundary elevations ({len(site_coords_2d)} points)...")
-        site_elevations = fetch_elevation_batch(site_coords_2d)
-        site_coords_3d = [(x, y, z) for (x, y), z in zip(site_coords_2d, site_elevations)]
-        
-        # Calculate height offset
-        print("\nCalculating height offset for site solid...")
-        z_offset = calculate_height_offset(
-            site_geometry, site_coords_3d, terrain_coords, terrain_elevations
+    try:
+        run_combined_terrain_workflow(
+            egrid=args.egrid,
+            center_x=args.center_x,
+            center_y=args.center_y,
+            radius=args.radius,
+            resolution=args.resolution,
+            densify=args.densify,
+            attach_to_solid=args.attach_to_solid,
+            output_path=args.output,
         )
-        
-        # Prepare site solid data BEFORE triangulation (so we can use smoothed boundary)
-        print("\nPreparing smoothed site solid...")
-        ext_coords, base_elevation, polygon_2d, smoothed_boundary_2d, smoothed_boundary_z = create_site_solid_coords(
-            site_geometry, site_coords_3d, z_offset_adjustment=z_offset
-        )
-        site_solid_data = {
-            'ext_coords': ext_coords,
-            'base_elevation': base_elevation,
-            'polygon_2d': polygon_2d
-        }
-        print(f"Site solid prepared with {len(ext_coords)} boundary points")
-    else:
-        print("Warning: No site geometry provided, skipping site solid")
-        site_coords_3d = []
-        z_offset = 0.0
-    
-    # Triangulate terrain with site cutout
-    print("\nTriangulating terrain mesh (excluding site area)...")
-    if site_geometry:
-        # Choose boundary elevations based on --attach-to-solid option
-        if args.attach_to_solid and smoothed_boundary_2d and smoothed_boundary_z:
-            print("  Using smoothed site solid boundary for terrain attachment")
-            boundary_coords = smoothed_boundary_2d
-            boundary_elevations = smoothed_boundary_z
-        else:
-            print("  Using raw API elevations for terrain boundary")
-            boundary_coords = site_coords_2d
-            boundary_elevations = site_elevations
-        
-        # Pass site boundary coordinates to ensure precise cutout shape
-        terrain_triangles = triangulate_terrain_with_cutout(
-            terrain_coords, terrain_elevations, site_geometry,
-            site_boundary_coords=boundary_coords,
-            site_boundary_elevations=boundary_elevations
-        )
-    else:
-        # No cutout if no site geometry
-        terrain_triangles = []
-        for i in range(len(terrain_coords) - 1):
-            for j in range(len(terrain_coords) - 1):
-                # Simple grid triangulation fallback
-                pass
-        print("Warning: Cannot create terrain without site geometry")
+    except requests.Timeout as exc:
+        print(f"Upstream request timed out: {exc}")
         sys.exit(1)
-    
-    print(f"Created {len(terrain_triangles)} terrain triangles")
-    
-    # Generate combined IFC
-    print("\nGenerating combined IFC file...")
-    create_combined_ifc(
-        terrain_triangles, site_solid_data, args.output, circle_bounds,
-        center_x, center_y, egrid=args.egrid, cadastre_metadata=cadastre_metadata
-    )
-    
-    print(f"\nSuccess! Combined terrain IFC saved to: {args.output}")
+    except requests.HTTPError as exc:
+        print(f"Upstream request failed: {exc}")
+        sys.exit(1)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        print(f"Unexpected error: {exc}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-
