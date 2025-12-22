@@ -30,7 +30,7 @@ class TestGenerateEndpoint:
     """Test /generate endpoint"""
     
     @patch('src.rest_api._run_generation')
-    def test_generate_success(self, mock_run, client, valid_request_payload, mock_combined_terrain_success):
+    def test_generate_success(self, mock_run, client, valid_request_payload):
         """Test successful generation"""
         # Create a temporary file for the mock
         import tempfile
@@ -147,14 +147,12 @@ class TestJobsEndpoint:
         status_response = client.get(f"/jobs/{job_id}")
         assert status_response.status_code == 200
         data = status_response.json()
-        assert data["status"] in ["pending", "running", "completed"]  # May complete quickly
+        # Status may be pending, running, or completed (if mock completes very quickly)
+        assert data["status"] in ["pending", "running", "completed"]
         
         # Cleanup
         if os.path.exists(tmp_file.name):
             os.unlink(tmp_file.name)
-        assert status_response.status_code == 200
-        data = status_response.json()
-        assert data["status"] in ["pending", "running"]
     
     def test_get_job_status_not_found(self, client):
         """Test getting status of non-existent job"""
@@ -162,15 +160,35 @@ class TestJobsEndpoint:
         assert response.status_code == 404
         assert "not found" in response.json()["detail"].lower()
     
-    def test_download_job_not_ready(self, client, valid_request_payload):
+    @patch('src.terrain_with_site.run_combined_terrain_workflow')
+    def test_download_job_not_ready(self, mock_terrain, client, valid_request_payload):
         """Test downloading job that's not ready"""
+        import tempfile
+        import os
+        import time
+        
+        # Mock terrain generation with delay to ensure job is still pending
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".ifc")
+        tmp_file.write(b"Mock IFC content")
+        tmp_file.close()
+        
+        def delayed_return(*args, **kwargs):
+            time.sleep(0.2)  # Delay to allow status check
+            return tmp_file.name
+        
+        mock_terrain.side_effect = delayed_return
+        
         # Create a job
         create_response = client.post("/jobs", json=valid_request_payload)
         job_id = create_response.json()["job_id"]
         
-        # Try to download immediately (should fail)
+        # Try to download immediately (should fail - job not ready yet)
         response = client.get(f"/jobs/{job_id}/download")
         assert response.status_code == 409
+        
+        # Cleanup
+        if os.path.exists(tmp_file.name):
+            os.unlink(tmp_file.name)
     
     def test_download_job_not_found(self, client):
         """Test downloading non-existent job"""
