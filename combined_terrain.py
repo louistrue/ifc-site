@@ -389,7 +389,9 @@ def calculate_height_offset(site_polygon, site_coords_3d, terrain_coords, terrai
 def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds, 
                         center_x, center_y, egrid=None, cadastre_metadata=None):
     """
-    Create a single IFC file with both terrain (with hole) and site solid.
+    Create an IFC file with terrain (with hole) and/or site solid.
+    terrain_triangles: List of triangles for terrain mesh, or None to skip terrain
+    site_solid_data: Dict with site solid data, or None to skip site solid
     cadastre_metadata: dict with parcel info from cadastre API
     """
     model = ifcopenshell.file(schema='IFC4')
@@ -458,7 +460,14 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
     minx, miny, maxx, maxy = bounds
     offset_x = round(center_x, -2)  # Round to nearest 100m
     offset_y = round(center_y, -2)
-    min_z = min(p[2] for tri in terrain_triangles for p in tri)
+    
+    # Determine min_z from available data
+    if terrain_triangles:
+        min_z = min(p[2] for tri in terrain_triangles for p in tri)
+    elif site_solid_data:
+        min_z = min(z for _, _, z in site_solid_data['ext_coords'])
+    else:
+        min_z = 0.0
     offset_z = round(min_z)
     
     print(f"\nProject Origin: E={offset_x}, N={offset_y}, H={offset_z}")
@@ -482,42 +491,43 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
                           products=[site], relating_object=project)
     ifcopenshell.api.run("geometry.edit_object_placement", model, product=site)
     
-    # Create terrain mesh (with hole)
-    print(f"\nCreating terrain mesh with {len(terrain_triangles)} triangles...")
-    terrain = ifcopenshell.api.run("root.create_entity", model,
-                                    ifc_class="IfcGeographicElement",
-                                    name="Surrounding_Terrain")
-    terrain.OwnerHistory = owner_history
-    terrain.PredefinedType = "TERRAIN"
-    
-    terrain_origin = model.createIfcCartesianPoint([0., 0., 0.])
-    terrain_axis = model.createIfcDirection([0., 0., 1.])
-    terrain_ref_direction = model.createIfcDirection([1., 0., 0.])
-    terrain_axis2_placement = model.createIfcAxis2Placement3D(terrain_origin, terrain_axis, terrain_ref_direction)
-    terrain_placement = model.createIfcLocalPlacement(site.ObjectPlacement, terrain_axis2_placement)
-    terrain.ObjectPlacement = terrain_placement
-    
-    ifcopenshell.api.run("spatial.assign_container", model,
-                          products=[terrain], relating_structure=site)
-    
-    terrain_faces = []
-    for tri in terrain_triangles:
-        local_pts = [(p[0] - offset_x, p[1] - offset_y, p[2] - offset_z) for p in tri]
-        tri_points = [
-            model.createIfcCartesianPoint([float(p[0]), float(p[1]), float(p[2])])
-            for p in local_pts
-        ]
-        tri_loop = model.createIfcPolyLoop(tri_points)
-        face = model.createIfcFace([model.createIfcFaceOuterBound(tri_loop, True)])
-        terrain_faces.append(face)
-    
-    terrain_shell = model.createIfcOpenShell(terrain_faces)
-    terrain_shell_model = model.createIfcShellBasedSurfaceModel([terrain_shell])
-    
-    terrain_rep = model.createIfcShapeRepresentation(
-        body_context, "Body", "SurfaceModel", [terrain_shell_model])
-    terrain.Representation = model.createIfcProductDefinitionShape(
-        None, None, [terrain_rep])
+    # Create terrain mesh (with hole) if requested
+    if terrain_triangles:
+        print(f"\nCreating terrain mesh with {len(terrain_triangles)} triangles...")
+        terrain = ifcopenshell.api.run("root.create_entity", model,
+                                        ifc_class="IfcGeographicElement",
+                                        name="Surrounding_Terrain")
+        terrain.OwnerHistory = owner_history
+        terrain.PredefinedType = "TERRAIN"
+        
+        terrain_origin = model.createIfcCartesianPoint([0., 0., 0.])
+        terrain_axis = model.createIfcDirection([0., 0., 1.])
+        terrain_ref_direction = model.createIfcDirection([1., 0., 0.])
+        terrain_axis2_placement = model.createIfcAxis2Placement3D(terrain_origin, terrain_axis, terrain_ref_direction)
+        terrain_placement = model.createIfcLocalPlacement(site.ObjectPlacement, terrain_axis2_placement)
+        terrain.ObjectPlacement = terrain_placement
+        
+        ifcopenshell.api.run("spatial.assign_container", model,
+                              products=[terrain], relating_structure=site)
+        
+        terrain_faces = []
+        for tri in terrain_triangles:
+            local_pts = [(p[0] - offset_x, p[1] - offset_y, p[2] - offset_z) for p in tri]
+            tri_points = [
+                model.createIfcCartesianPoint([float(p[0]), float(p[1]), float(p[2])])
+                for p in local_pts
+            ]
+            tri_loop = model.createIfcPolyLoop(tri_points)
+            face = model.createIfcFace([model.createIfcFaceOuterBound(tri_loop, True)])
+            terrain_faces.append(face)
+        
+        terrain_shell = model.createIfcOpenShell(terrain_faces)
+        terrain_shell_model = model.createIfcShellBasedSurfaceModel([terrain_shell])
+        
+        terrain_rep = model.createIfcShapeRepresentation(
+            body_context, "Body", "SurfaceModel", [terrain_shell_model])
+        terrain.Representation = model.createIfcProductDefinitionShape(
+            None, None, [terrain_rep])
     
     # Create site solid
     if site_solid_data:
@@ -732,8 +742,9 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
                 pass  # Some entities may not accept OwnerHistory
     
     model.write(output_path)
-    print(f"\nCombined IFC file created: {output_path}")
-    print(f"  Terrain triangles: {len(terrain_triangles)}")
+    print(f"\nIFC file created: {output_path}")
+    if terrain_triangles:
+        print(f"  Terrain triangles: {len(terrain_triangles)}")
     if site_solid_data:
         print(f"  Site solid: created")
     
@@ -748,6 +759,8 @@ def run_combined_terrain_workflow(
     resolution=10.0,
     densify=0.5,
     attach_to_solid=False,
+    include_terrain=True,
+    include_site_solid=True,
     output_path="combined_terrain.ifc",
 ):
     """
@@ -772,19 +785,18 @@ def run_combined_terrain_workflow(
     else:
         raise ValueError("Site geometry is required for combined terrain generation; provide an EGRID.")
 
-    # Create terrain grid
-    terrain_coords, circle_bounds = create_circular_terrain_grid(
-        center_x, center_y, radius=radius, resolution=resolution
-    )
+    # Initialize variables
+    terrain_triangles = None
+    site_solid_data = None
+    circle_bounds = None
+    terrain_coords = None
+    terrain_elevations = None
+    site_coords_3d = None
+    smoothed_boundary_2d = None
+    smoothed_boundary_z = None
+    z_offset = None  # Will be calculated once if needed
 
-    if len(terrain_coords) == 0:
-        raise ValueError("No points generated in circular area.")
-
-    # Fetch terrain elevations
-    print("\nFetching terrain elevations...")
-    terrain_elevations = fetch_elevation_batch(terrain_coords)
-
-    # Get site boundary 3D coordinates
+    # Get site boundary 3D coordinates (needed for both terrain and site solid)
     ring = site_geometry.exterior
     distances = np.arange(0, ring.length, densify)
     if distances[-1] < ring.length:
@@ -797,53 +809,93 @@ def run_combined_terrain_workflow(
     site_elevations = fetch_elevation_batch(site_coords_2d)
     site_coords_3d = [(x, y, z) for (x, y), z in zip(site_coords_2d, site_elevations)]
 
-    # Calculate height offset
-    print("\nCalculating height offset for site solid...")
-    z_offset = calculate_height_offset(
-        site_geometry, site_coords_3d, terrain_coords, terrain_elevations
-    )
+    # Create terrain if requested
+    if include_terrain:
+        # Create terrain grid
+        terrain_coords, circle_bounds = create_circular_terrain_grid(
+            center_x, center_y, radius=radius, resolution=resolution
+        )
 
-    # Prepare site solid data BEFORE triangulation (so we can use smoothed boundary)
-    print("\nPreparing smoothed site solid...")
-    (
-        ext_coords,
-        base_elevation,
-        polygon_2d,
-        smoothed_boundary_2d,
-        smoothed_boundary_z,
-    ) = create_site_solid_coords(
-        site_geometry, site_coords_3d, z_offset_adjustment=z_offset
-    )
-    site_solid_data = {
-        "ext_coords": ext_coords,
-        "base_elevation": base_elevation,
-        "polygon_2d": polygon_2d,
-    }
-    print(f"Site solid prepared with {len(ext_coords)} boundary points")
+        if len(terrain_coords) == 0:
+            raise ValueError("No points generated in circular area.")
 
-    # Triangulate terrain with site cutout
-    print("\nTriangulating terrain mesh (excluding site area)...")
-    if attach_to_solid and smoothed_boundary_2d and smoothed_boundary_z:
-        print("  Using smoothed site solid boundary for terrain attachment")
-        boundary_coords = smoothed_boundary_2d
-        boundary_elevations = smoothed_boundary_z
-    else:
-        print("  Using raw API elevations for terrain boundary")
-        boundary_coords = site_coords_2d
-        boundary_elevations = site_elevations
+        # Fetch terrain elevations
+        print("\nFetching terrain elevations...")
+        terrain_elevations = fetch_elevation_batch(terrain_coords)
 
-    terrain_triangles = triangulate_terrain_with_cutout(
-        terrain_coords,
-        terrain_elevations,
-        site_geometry,
-        site_boundary_coords=boundary_coords,
-        site_boundary_elevations=boundary_elevations,
-    )
+        # Calculate height offset if site solid is also included (needed for alignment)
+        if include_site_solid and z_offset is None:
+            print("\nCalculating height offset for site solid...")
+            z_offset = calculate_height_offset(
+                site_geometry, site_coords_3d, terrain_coords, terrain_elevations
+            )
 
-    print(f"Created {len(terrain_triangles)} terrain triangles")
+        # Prepare site solid boundary for terrain attachment
+        if include_site_solid and attach_to_solid:
+            # Need to prepare smoothed boundary for attachment
+            if z_offset is None:
+                z_offset = 0.0
+            (
+                _,
+                _,
+                _,
+                smoothed_boundary_2d,
+                smoothed_boundary_z,
+            ) = create_site_solid_coords(
+                site_geometry, site_coords_3d, z_offset_adjustment=z_offset
+            )
+            print("  Using smoothed site solid boundary for terrain attachment")
+            boundary_coords = smoothed_boundary_2d
+            boundary_elevations = smoothed_boundary_z
+        else:
+            print("  Using raw API elevations for terrain boundary")
+            boundary_coords = site_coords_2d
+            boundary_elevations = site_elevations
+
+        # Triangulate terrain with site cutout
+        print("\nTriangulating terrain mesh (excluding site area)...")
+        terrain_triangles = triangulate_terrain_with_cutout(
+            terrain_coords,
+            terrain_elevations,
+            site_geometry,
+            site_boundary_coords=boundary_coords,
+            site_boundary_elevations=boundary_elevations,
+        )
+        print(f"Created {len(terrain_triangles)} terrain triangles")
+
+    # Create site solid if requested
+    if include_site_solid:
+        # Use calculated z_offset if available, otherwise use 0.0
+        if z_offset is None:
+            z_offset = 0.0
+            print("\nNo terrain provided, using site boundary elevations directly")
+
+        # Prepare site solid data
+        print("\nPreparing smoothed site solid...")
+        (
+            ext_coords,
+            base_elevation,
+            polygon_2d,
+            smoothed_boundary_2d,
+            smoothed_boundary_z,
+        ) = create_site_solid_coords(
+            site_geometry, site_coords_3d, z_offset_adjustment=z_offset
+        )
+        site_solid_data = {
+            "ext_coords": ext_coords,
+            "base_elevation": base_elevation,
+            "polygon_2d": polygon_2d,
+        }
+        print(f"Site solid prepared with {len(ext_coords)} boundary points")
+
+    # Determine bounds for IFC creation
+    if circle_bounds is None:
+        # Use site bounds if no terrain
+        bounds = site_geometry.bounds
+        circle_bounds = (bounds[0], bounds[1], bounds[2], bounds[3])
 
     # Generate combined IFC
-    print("\nGenerating combined IFC file...")
+    print("\nGenerating IFC file...")
     create_combined_ifc(
         terrain_triangles,
         site_solid_data,
