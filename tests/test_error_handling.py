@@ -162,18 +162,12 @@ class TestFileHandling:
     
     def test_temp_file_cleanup(self, client, valid_request_payload):
         """Test that temp files are cleaned up"""
-        import os
-        import tempfile
-        
-        # Get temp directory
-        temp_dir = os.getenv("TMPDIR", tempfile.gettempdir())
-        initial_files = set(os.listdir(temp_dir)) if os.path.exists(temp_dir) else set()
-        
         # Create a job (which may create temp files)
         response = client.post("/jobs", json=valid_request_payload)
         assert response.status_code == 200
         
-        # Note: Actual cleanup happens after download
-        # This test verifies the mechanism exists
-        # In production, files are cleaned up by background tasks
+        # Note: Actual cleanup happens after download or via TTL-based cleanup
+        # This test verifies the job creation mechanism exists
+        # In production, files are cleaned up by background tasks after download
+        # or automatically via the TTL-based cleanup mechanism
 

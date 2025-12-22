@@ -766,24 +766,21 @@ def run_combined_terrain_workflow(
     """
     Run the combined terrain generation workflow using the existing processing pipeline.
     """
-    if not egrid and not (center_x and center_y):
-        raise ValueError("Either an EGRID or both center_x and center_y must be provided.")
+    if not egrid:
+        raise ValueError("EGRID is required for combined terrain generation.")
 
     # Fetch site boundary from cadastre (required for combined workflow)
     cadastre_metadata = None
     site_geometry = None
-    if egrid:
-        site_geometry, cadastre_metadata = fetch_boundary_by_egrid(egrid)
-        if site_geometry is None:
-            raise ValueError(f"Failed to fetch site boundary for EGRID {egrid}")
-        centroid = site_geometry.centroid
-        center_x = center_x if center_x is not None else centroid.x
-        center_y = center_y if center_y is not None else centroid.y
-        bounds = site_geometry.bounds
-        print(f"Site bounds: E {bounds[0]:.1f}-{bounds[2]:.1f}, N {bounds[1]:.1f}-{bounds[3]:.1f}")
-        print(f"Site centroid: E {center_x:.1f}, N {center_y:.1f}")
-    else:
-        raise ValueError("Site geometry is required for combined terrain generation; provide an EGRID.")
+    site_geometry, cadastre_metadata = fetch_boundary_by_egrid(egrid)
+    if site_geometry is None:
+        raise ValueError(f"Failed to fetch site boundary for EGRID {egrid}")
+    centroid = site_geometry.centroid
+    center_x = center_x if center_x is not None else centroid.x
+    center_y = center_y if center_y is not None else centroid.y
+    bounds = site_geometry.bounds
+    print(f"Site bounds: E {bounds[0]:.1f}-{bounds[2]:.1f}, N {bounds[1]:.1f}-{bounds[3]:.1f}")
+    print(f"Site centroid: E {center_x:.1f}, N {center_y:.1f}")
 
     # Initialize variables
     terrain_triangles = None

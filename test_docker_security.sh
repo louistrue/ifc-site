@@ -20,12 +20,17 @@ fi
 
 echo ""
 echo "2. Verifying processes run as non-root..."
-docker run --rm $IMAGE_NAME ps aux | grep -v "USER.*COMMAND" | awk '{print $1}' | sort -u | while read proc_user; do
+FOUND_NON_APPUSER=false
+while read proc_user; do
     if [ "$proc_user" != "appuser" ] && [ "$proc_user" != "USER" ]; then
         echo "✗ Found process running as: $proc_user"
-        exit 1
+        FOUND_NON_APPUSER=true
     fi
-done
+done < <(docker run --rm $IMAGE_NAME ps aux | grep -v "USER.*COMMAND" | awk '{print $1}' | sort -u)
+
+if [ "$FOUND_NON_APPUSER" = true ]; then
+    exit 1
+fi
 echo "✓ All processes run as appuser"
 
 echo ""

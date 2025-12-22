@@ -25,35 +25,38 @@ fi
 TEST_TYPE="${1:-all}"
 COVERAGE="${2:-true}"
 
+# Initialize exit code
+EXIT_CODE=0
+
 case "$TEST_TYPE" in
     unit)
         echo -e "${YELLOW}Running unit tests...${NC}"
-        pytest tests/test_validation.py -v -m "not slow"
+        pytest tests/test_validation.py -v -m "not slow" || EXIT_CODE=$?
         ;;
     integration)
         echo -e "${YELLOW}Running integration tests...${NC}"
-        pytest tests/test_endpoints.py -v -m "not slow"
+        pytest tests/test_endpoints.py -v -m "not slow" || EXIT_CODE=$?
         ;;
     security)
         echo -e "${YELLOW}Running security tests...${NC}"
-        pytest tests/test_security.py -v
+        pytest tests/test_security.py -v || EXIT_CODE=$?
         ;;
     error)
         echo -e "${YELLOW}Running error handling tests...${NC}"
-        pytest tests/test_error_handling.py -v -m "not slow"
+        pytest tests/test_error_handling.py -v -m "not slow" || EXIT_CODE=$?
         ;;
     fast)
         echo -e "${YELLOW}Running fast tests (excluding slow tests)...${NC}"
-        pytest tests/ -v -m "not slow"
+        pytest tests/ -v -m "not slow" || EXIT_CODE=$?
         ;;
     all)
         echo -e "${YELLOW}Running all tests...${NC}"
         if [ "$COVERAGE" = "true" ]; then
-            pytest tests/ -v --cov=api --cov=combined_terrain --cov-report=term-missing --cov-report=html
+            pytest tests/ -v --cov=api --cov=combined_terrain --cov-report=term-missing --cov-report=html || EXIT_CODE=$?
             echo ""
             echo -e "${GREEN}Coverage report generated in htmlcov/index.html${NC}"
         else
-            pytest tests/ -v
+            pytest tests/ -v || EXIT_CODE=$?
         fi
         ;;
     *)
@@ -68,8 +71,6 @@ case "$TEST_TYPE" in
         exit 1
         ;;
 esac
-
-EXIT_CODE=$?
 
 echo ""
 if [ $EXIT_CODE -eq 0 ]; then

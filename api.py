@@ -1,7 +1,8 @@
 import asyncio
 import os
 import tempfile
-from typing import Dict, Optional
+import time
+from typing import Dict, Optional, Set
 from uuid import uuid4
 
 import requests
@@ -151,10 +152,18 @@ class JobRecord:
         self.output_name: str = output_name
         self.path: Optional[str] = None
         self.error: Optional[str] = None
+        self.created_at: float = time.time()
+        self.finished_at: Optional[float] = None
 
 
 jobs: Dict[str, JobRecord] = {}
 job_lock = asyncio.Lock()
+_background_tasks: Set[asyncio.Task] = set()
+
+# Configuration constants for job cleanup (can be overridden in tests)
+JOB_TTL_SECONDS = float(os.getenv("JOB_TTL_SECONDS", "86400"))  # 24 hours default
+JOB_MAX_COUNT = int(os.getenv("JOB_MAX_COUNT", "1000"))  # Max stored jobs
+CLEANUP_INTERVAL_SECONDS = float(os.getenv("CLEANUP_INTERVAL_SECONDS", "3600"))  # 1 hour default
 
 
 def _ensure_ifc_extension(name: str) -> str:
@@ -164,13 +173,25 @@ def _ensure_ifc_extension(name: str) -> str:
 
 
 def _cleanup_file(path: str):
+    """Clean up a file"""
     try:
         os.remove(path)
     except FileNotFoundError:
         pass
 
 
+async def _cleanup_file_and_update_job(path: str, job_id: str):
+    """Clean up a file and update job state to expired"""
+    _cleanup_file(path)
+    async with job_lock:
+        job = jobs.get(job_id)
+        if job:
+            job.path = None
+            job.status = "expired"
+
+
 def _map_exception_to_http(exc: Exception) -> HTTPException:
+    """Map exceptions to HTTP exceptions, preserving traceback context"""
     if isinstance(exc, ValueError):
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, requests.Timeout):
@@ -180,6 +201,73 @@ def _map_exception_to_http(exc: Exception) -> HTTPException:
     if isinstance(exc, requests.RequestException):
         return HTTPException(status_code=502, detail="Upstream request failed.")
     return HTTPException(status_code=500, detail="Internal server error.")
+
+
+def _file_stream_generator(file_path: str):
+    """Generator that safely streams a file and ensures it's closed"""
+    file_handle = None
+    try:
+        file_handle = open(file_path, "rb")
+        while True:
+            chunk = file_handle.read(8192)  # 8KB chunks
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        if file_handle:
+            file_handle.close()
+
+
+async def _cleanup_old_jobs():
+    """Background task to clean up old jobs based on TTL and max count"""
+    while True:
+        try:
+            await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+            
+            async with job_lock:
+                current_time = time.time()
+                jobs_to_remove = []
+                
+                # First pass: Remove jobs older than TTL
+                for job_id, job in jobs.items():
+                    if job.finished_at and (current_time - job.finished_at) > JOB_TTL_SECONDS:
+                        jobs_to_remove.append(job_id)
+                    elif not job.finished_at and (current_time - job.created_at) > JOB_TTL_SECONDS:
+                        # Also remove very old pending/running jobs (stuck jobs)
+                        jobs_to_remove.append(job_id)
+                
+                # Remove TTL-expired jobs
+                for job_id in jobs_to_remove:
+                    job = jobs[job_id]
+                    if job.path and os.path.exists(job.path):
+                        try:
+                            os.remove(job.path)
+                        except (FileNotFoundError, OSError):
+                            pass
+                    del jobs[job_id]
+                
+                # Second pass: If still over max count, remove oldest finished jobs
+                if len(jobs) > JOB_MAX_COUNT:
+                    finished_jobs = [
+                        (job_id, job) 
+                        for job_id, job in jobs.items() 
+                        if job.finished_at is not None
+                    ]
+                    # Sort by finished_at, oldest first
+                    finished_jobs.sort(key=lambda x: x[1].finished_at or 0)
+                    
+                    excess_count = len(jobs) - JOB_MAX_COUNT
+                    for job_id, job in finished_jobs[:excess_count]:
+                        if job.path and os.path.exists(job.path):
+                            try:
+                                os.remove(job.path)
+                            except (FileNotFoundError, OSError):
+                                pass
+                        del jobs[job_id]
+                        
+        except Exception as e:
+            # Log error but continue cleanup loop
+            print(f"Error in job cleanup task: {e}")
 
 
 async def _run_generation(request: GenerateRequest, output_path: str):
@@ -196,6 +284,22 @@ async def _run_generation(request: GenerateRequest, output_path: str):
         request.include_site_solid,
         output_path,
     )
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background cleanup task on application startup"""
+    cleanup_task = asyncio.create_task(_cleanup_old_jobs())
+    _background_tasks.add(cleanup_task)
+    cleanup_task.add_done_callback(_background_tasks.discard)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cancel background tasks on shutdown"""
+    for task in _background_tasks:
+        task.cancel()
+    await asyncio.gather(*_background_tasks, return_exceptions=True)
 
 
 @app.get(
@@ -238,7 +342,7 @@ async def generate_file(request: Request, body: GenerateRequest):
         await _run_generation(body, tmp_path)
     except Exception as exc:
         _cleanup_file(tmp_path)
-        raise _map_exception_to_http(exc)
+        raise _map_exception_to_http(exc) from exc
 
     headers = {
         "Content-Disposition": f'attachment; filename="{desired_name}"'
@@ -246,7 +350,7 @@ async def generate_file(request: Request, body: GenerateRequest):
     background = BackgroundTasks()
     background.add_task(_cleanup_file, tmp_path)
     return StreamingResponse(
-        open(tmp_path, "rb"),
+        _file_stream_generator(tmp_path),
         media_type="application/octet-stream",
         headers=headers,
         background=background,
@@ -272,6 +376,7 @@ async def _execute_job(job_id: str, request: GenerateRequest):
             job = jobs[job_id]
             job.status = "failed"
             job.error = detail
+            job.finished_at = time.time()
         _cleanup_file(tmp_path)
         return
 
@@ -279,6 +384,7 @@ async def _execute_job(job_id: str, request: GenerateRequest):
         job = jobs[job_id]
         job.status = "completed"
         job.path = tmp_path
+        job.finished_at = time.time()
 
 
 @app.post(
@@ -300,7 +406,9 @@ async def create_job(request: Request, body: GenerateRequest):
     async with job_lock:
         jobs[job_id] = JobRecord(output_name=output_name)
 
-    asyncio.create_task(_execute_job(job_id, body))
+    task = asyncio.create_task(_execute_job(job_id, body))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     return {"job_id": job_id}
 
@@ -366,14 +474,9 @@ async def download_job(job_id: str):
         "Content-Disposition": f'attachment; filename="{output_name}"'
     }
     background = BackgroundTasks()
-    background.add_task(_cleanup_file, path)
-    async with job_lock:
-        job = jobs.get(job_id)
-        if job:
-            job.path = None
-            job.status = "expired"
+    background.add_task(_cleanup_file_and_update_job, path, job_id)
     return StreamingResponse(
-        open(path, "rb"),
+        _file_stream_generator(path),
         media_type="application/octet-stream",
         headers=headers,
         background=background,

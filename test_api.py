@@ -214,6 +214,7 @@ def test_job_download(job_id, job_data):
 def test_error_handling():
     """Test error handling"""
     print("\n=== Testing error handling ===")
+    all_passed = True
     
     # Test missing egrid
     try:
@@ -226,6 +227,7 @@ def test_error_handling():
         print("✓ Missing egrid validation works")
     except Exception as e:
         print(f"✗ Missing egrid test failed: {e}")
+        all_passed = False
     
     # Test invalid job_id
     try:
@@ -237,8 +239,10 @@ def test_error_handling():
         print("✓ Invalid job_id returns 404")
     except Exception as e:
         print(f"✗ Invalid job_id test failed: {e}")
+        all_passed = False
     
     # Test download before completion
+    job_id = None
     try:
         job_id = test_jobs_create()
         if job_id:
@@ -251,6 +255,26 @@ def test_error_handling():
             print("✓ Download before completion returns 409")
     except Exception as e:
         print(f"✗ Download before completion test failed: {e}")
+        all_passed = False
+    finally:
+        # Cleanup: Wait briefly and try to download if job completes
+        # This triggers cleanup via the download endpoint's background task
+        # If job doesn't complete quickly, it will be cleaned up by TTL mechanism
+        if job_id:
+            try:
+                # Wait a short time to see if job completes
+                time.sleep(2)
+                status_response = requests.get(f"{BASE_URL}/jobs/{job_id}", timeout=5)
+                if status_response.status_code == 200:
+                    status_data = status_response.json()
+                    if status_data.get("status") == "completed":
+                        # Trigger cleanup by downloading
+                        requests.get(f"{BASE_URL}/jobs/{job_id}/download", timeout=5)
+            except Exception:
+                # Ignore cleanup errors - job will be cleaned up by TTL
+                pass
+    
+    return all_passed
 
 def main():
     """Run all tests"""
@@ -287,7 +311,7 @@ def main():
         results.append(("Job Download", test_job_download(job_id, job_data)))
     
     # Test 6: Error handling
-    test_error_handling()
+    results.append(("Error Handling", test_error_handling()))
     
     # Summary
     print("\n" + "=" * 60)
