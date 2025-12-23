@@ -15,42 +15,11 @@ except ImportError:
     print("ERROR: pygltflib not installed. Run: pip install pygltflib")
     sys.exit(1)
 
+sys.path.insert(0, '.')
+from combined_terrain import parse_b3dm_header
+
 # Test tile URL (from the working test)
 TILE_URL = "https://3d.geo.admin.ch/ch.swisstopo.swissbuildings3d.3d/v1/20251121/11/1891/425.b3dm"
-
-def parse_b3dm_header(b3dm_data):
-    """Parse b3dm header"""
-    if len(b3dm_data) < 28:
-        return None
-    
-    magic = b3dm_data[0:4]
-    if magic != b'b3dm':
-        return None
-    
-    version, = struct.unpack('<I', b3dm_data[4:8])
-    byte_length, = struct.unpack('<I', b3dm_data[8:12])
-    feature_table_json_byte_length, = struct.unpack('<I', b3dm_data[12:16])
-    feature_table_binary_byte_length, = struct.unpack('<I', b3dm_data[16:20])
-    batch_table_json_byte_length, = struct.unpack('<I', b3dm_data[20:24])
-    batch_table_binary_byte_length, = struct.unpack('<I', b3dm_data[24:28])
-    
-    header_end = 28
-    feature_table_json_start = header_end
-    feature_table_json_end = feature_table_json_start + feature_table_json_byte_length
-    feature_table_binary_start = feature_table_json_end
-    feature_table_binary_end = feature_table_binary_start + feature_table_binary_byte_length
-    batch_table_json_start = feature_table_binary_end
-    batch_table_json_end = batch_table_json_start + batch_table_json_byte_length
-    batch_table_binary_start = batch_table_json_end
-    glb_start = batch_table_json_start + batch_table_json_byte_length + batch_table_binary_byte_length
-    
-    return {
-        'version': version,
-        'byte_length': byte_length,
-        'feature_table_json': b3dm_data[feature_table_json_start:feature_table_json_end],
-        'batch_table_json': b3dm_data[batch_table_json_start:batch_table_json_end] if batch_table_json_byte_length > 0 else b'',
-        'glb_data': b3dm_data[glb_start:]
-    }
 
 def parse_glb_debug(glb_data):
     """Debug GLB parsing with detailed output"""

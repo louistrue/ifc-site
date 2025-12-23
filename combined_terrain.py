@@ -26,6 +26,7 @@ import struct
 import subprocess
 import tempfile
 import os
+import concurrent.futures
 try:
     import trimesh
 except ImportError:
@@ -39,6 +40,50 @@ try:
     import pygltflib
 except ImportError:
     pygltflib = None
+
+
+# Cache for geoid undulation values to avoid redundant API calls
+_geoid_cache = {}
+
+
+def fetch_geoid_undulation(x_lv95, y_lv95):
+    """
+    Fetch the geoid undulation (difference between ellipsoidal and orthometric height)
+    at a given LV95 location using the Swisstopo REFRAME API.
+    
+    Returns: Geoid undulation in meters (ellipsoidal - orthometric)
+    """
+    # Round to 100m grid for caching (geoid varies slowly)
+    cache_key = (round(x_lv95 / 100) * 100, round(y_lv95 / 100) * 100)
+    
+    if cache_key in _geoid_cache:
+        return _geoid_cache[cache_key]
+    
+    try:
+        # Use REFRAME API to convert from LV95+LN02 to WGS84
+        # The difference in altitude gives us the geoid undulation
+        url = "https://geodesy.geo.admin.ch/reframe/lv95towgs84"
+        params = {
+            "easting": x_lv95,
+            "northing": y_lv95,
+            "altitude": 0,  # Reference orthometric height
+            "format": "json"
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        # The returned altitude is the ellipsoidal height for 0m orthometric
+        # So the geoid undulation = returned_altitude - 0 = returned_altitude
+        geoid_undulation = float(data.get("altitude", 47.5))  # Default ~47.5m for Switzerland
+        
+        _geoid_cache[cache_key] = geoid_undulation
+        return geoid_undulation
+        
+    except Exception as e:
+        print(f"  Warning: Could not fetch geoid undulation: {e}")
+        # Fallback: use average Swiss geoid undulation (~47.5m)
+        return 47.5
 
 
 def fetch_boundary_by_egrid(egrid):
@@ -96,34 +141,45 @@ def fetch_boundary_by_egrid(egrid):
     return geometry, metadata
 
 
-def fetch_elevation_batch(coords, batch_size=50, delay=0.1):
+def fetch_elevation_batch(coords, batch_size=50, max_workers=20):
     """
     Fetch elevations for a list of coordinates via geo.admin.ch REST height service.
+    Uses parallel requests for improved performance.
     """
     url = "https://api3.geo.admin.ch/rest/services/height"
-    elevations = []
-    failed_count = 0
     total = len(coords)
     
-    print(f"Fetching elevations for {total} points...")
-    
-    for i, (x, y) in enumerate(coords):
+    def fetch_one(coord):
+        x, y = coord
         try:
             res = requests.get(url, params={"easting": x, "northing": y, "sr": "2056"}, timeout=10)
             res.raise_for_status()
-            h = float(res.json()["height"])
-            elevations.append(h)
+            return float(res.json()["height"])
         except Exception:
-            elevations.append(elevations[-1] if elevations else 0.0)
-            failed_count += 1
-        
-        if (i + 1) % batch_size == 0:
-            pct = (i + 1) / total * 100
-            print(f"  Progress: {i + 1}/{total} ({pct:.1f}%)")
-            time.sleep(delay)
+            return None
     
+    print(f"Fetching elevations for {total} points (parallel, {max_workers} workers)...")
+    
+    # Fetch all elevations in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        elevations = list(executor.map(fetch_one, coords))
+    
+    # Handle failures with fallback to neighbor values
+    failed_count = sum(1 for e in elevations if e is None)
     if failed_count > 0:
-        print(f"  Warning: {failed_count} points failed to fetch elevation")
+        print(f"  Warning: {failed_count} points failed, using interpolation")
+        # Fill None values with neighbors
+        for i, e in enumerate(elevations):
+            if e is None:
+                # Try previous value
+                if i > 0 and elevations[i-1] is not None:
+                    elevations[i] = elevations[i-1]
+                # Try next value
+                elif i < len(elevations) - 1 and elevations[i+1] is not None:
+                    elevations[i] = elevations[i+1]
+                # Fallback to 0.0
+                else:
+                    elevations[i] = 0.0
     
     return elevations
 
@@ -819,85 +875,85 @@ def parse_glb_geometries(glb_data):
         return []
 
 
-def transform_tile_to_lv95(vertices, tile_transform, region):
+def transform_tile_to_lv95(vertices, tile_transform, region, rtc_center=None):
     """
     Transform vertices from tile-local coordinates to EPSG:2056 (Swiss LV95).
     
     tile_transform: 4x4 transformation matrix (if available)
     region: [west, south, east, north, min_height, max_height] in radians
+    rtc_center: RTC_CENTER from feature table in ECEF coordinates [x, y, z], if available
     """
     if not vertices:
         return []
     
-    # Extract region bounds
-    west, south, east, north, min_h, max_h = region
-    
-    # Convert region to degrees
-    west_deg = math.degrees(west)
-    south_deg = math.degrees(south)
-    east_deg = math.degrees(east)
-    north_deg = math.degrees(north)
-    
-    # Calculate center of region
-    center_lon = (west_deg + east_deg) / 2
-    center_lat = (south_deg + north_deg) / 2
-    
-    # Transform center to EPSG:2056
-    transformer = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
-    center_x, center_y = transformer.transform(center_lon, center_lat)
-    
-    # Transform vertices from local tile coordinates to EPSG:2056
-    # In b3dm tiles, vertices are typically in ECEF or local tile coordinates
-    # We need to map them to the tile's region bounds
-    
-    # Get region corners in EPSG:2056
-    sw_x, sw_y = transformer.transform(west_deg, south_deg)
-    ne_x, ne_y = transformer.transform(east_deg, north_deg)
-    nw_x, nw_y = transformer.transform(west_deg, north_deg)
-    se_x, se_y = transformer.transform(east_deg, south_deg)
-    
-    # Calculate region dimensions in meters
-    region_width_m = abs(ne_x - nw_x)  # Width in X direction (east-west)
-    region_height_m = abs(ne_y - se_y)  # Height in Y direction (north-south)
-    
-    # Get vertex coordinate ranges
-    x_coords = [v[0] for v in vertices]
-    y_coords = [v[1] for v in vertices]
-    vertex_min_x, vertex_max_x = min(x_coords), max(x_coords)
-    vertex_min_y, vertex_max_y = min(y_coords), max(y_coords)
-    vertex_range_x = vertex_max_x - vertex_min_x if vertex_max_x != vertex_min_x else 1.0
-    vertex_range_y = vertex_max_y - vertex_min_y if vertex_max_y != vertex_min_y else 1.0
-    
-    # Calculate scale factors: region size / vertex range
-    # This maps vertex coordinates to meters
-    scale_x = region_width_m / vertex_range_x if vertex_range_x > 0.001 else 1.0
-    scale_y = region_height_m / vertex_range_y if vertex_range_y > 0.001 else 1.0
-    
-    # Use southwest corner as origin
-    tile_origin_x = sw_x
-    tile_origin_y = sw_y
-    
-    # Transform vertices: map from local tile space to EPSG:2056
-    transformed_vertices = []
-    for v in vertices:
-        # Calculate relative position within vertex bounding box
-        rel_x = v[0] - vertex_min_x
-        rel_y = v[1] - vertex_min_y
+    if rtc_center:
+        # RTC_CENTER is in ECEF (Earth-Centered, Earth-Fixed) coordinates
+        # Vertices are relative to RTC_CENTER, also in ECEF coordinates
+        # We must add vertex to RTC_CENTER in ECEF, then transform to LV95
+        ecef_x, ecef_y, ecef_z = rtc_center
         
-        # Scale to world coordinates and add to tile origin
-        world_x = tile_origin_x + (rel_x * scale_x)
-        world_y = tile_origin_y + (rel_y * scale_y)
-        world_z = v[2]  # Height (add region min_height if needed)
+        # Create transformers (reuse for efficiency)
+        transformer_ecef = Transformer.from_crs("EPSG:4978", "EPSG:4326", always_xy=True)
+        transformer_lv95 = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
         
-        transformed_vertices.append([world_x, world_y, world_z])
-    
-    return transformed_vertices
+        transformed_vertices = []
+        for v in vertices:
+            # Add vertex to RTC_CENTER in ECEF space
+            vertex_ecef_x = ecef_x + v[0]
+            vertex_ecef_y = ecef_y + v[1]
+            vertex_ecef_z = ecef_z + v[2]
+            
+            # Transform from ECEF to WGS84 geographic
+            lon, lat, alt = transformer_ecef.transform(vertex_ecef_x, vertex_ecef_y, vertex_ecef_z)
+            
+            # Transform from WGS84 to LV95
+            world_x, world_y = transformer_lv95.transform(lon, lat)
+            
+            # Keep relative Z - it represents height relative to local terrain
+            # Terrain elevation will be added per-building in prepare_building_geometries
+            world_z = v[2]
+            
+            transformed_vertices.append([world_x, world_y, world_z])
+        
+        return transformed_vertices
+    else:
+        # Fallback to region center (existing behavior for tiles without RTC_CENTER)
+        if not region or len(region) < 4:
+            # If no region, cannot transform
+            return vertices
+        
+        west, south, east, north = region[0], region[1], region[2], region[3]
+        
+        # Convert region to degrees
+        west_deg = math.degrees(west)
+        south_deg = math.degrees(south)
+        east_deg = math.degrees(east)
+        north_deg = math.degrees(north)
+        
+        # Calculate center of region
+        center_lon = (west_deg + east_deg) / 2
+        center_lat = (south_deg + north_deg) / 2
+        
+        # Transform center to EPSG:2056
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
+        tile_center_x, tile_center_y = transformer.transform(center_lon, center_lat)
+        
+        # For fallback, vertices are assumed to be in meters relative to region center
+        transformed_vertices = []
+        for v in vertices:
+            world_x = tile_center_x + v[0]
+            world_y = tile_center_y + v[1]
+            world_z = v[2]
+            transformed_vertices.append([world_x, world_y, world_z])
+        
+        return transformed_vertices
 
 
 def meshes_to_geojson(building_meshes, building_attributes=None):
     """
-    Convert 3D building meshes to GeoJSON format compatible with existing code.
-    Returns list of building dicts with geometry_json, geometry, attributes.
+    Convert 3D building meshes to building dicts with full mesh data.
+    Each mesh becomes one building (keeps full 3D geometry intact).
+    Returns list of building dicts with geometry, mesh_vertices, mesh_faces, attributes.
     """
     buildings = []
     
@@ -905,7 +961,7 @@ def meshes_to_geojson(building_meshes, building_attributes=None):
         vertices = mesh.get('vertices', [])
         faces = mesh.get('faces', [])
         
-        if not vertices:
+        if not vertices or not faces:
             continue
         
         x_coords = [v[0] for v in vertices]
@@ -916,80 +972,40 @@ def meshes_to_geojson(building_meshes, building_attributes=None):
         min_y, max_y = min(y_coords), max(y_coords)
         min_z, max_z = min(z_coords), max(z_coords)
         
-        # Try to extract footprint from lowest Z faces
-        footprint_points = []
-        if faces:
-            # Find faces at or near minimum Z (footprint level)
-            tolerance = (max_z - min_z) * 0.1  # 10% of height
-            footprint_faces = []
-            for face in faces:
-                if len(face) == 3:
-                    v0, v1, v2 = vertices[face[0]], vertices[face[1]], vertices[face[2]]
-                    avg_z = (v0[2] + v1[2] + v2[2]) / 3.0
-                    if avg_z <= min_z + tolerance:
-                        footprint_faces.append(face)
-            
-            # Extract unique points from footprint faces
-            footprint_vertex_indices = set()
-            for face in footprint_faces:
-                footprint_vertex_indices.update(face)
-            
-            # Get 2D points (x, y) from footprint vertices
-            footprint_2d_points = []
-            for vi in footprint_vertex_indices:
-                if vi < len(vertices):
-                    v = vertices[vi]
-                    footprint_2d_points.append((v[0], v[1]))
-            
-            # Create convex hull or bounding polygon
-            if len(footprint_2d_points) >= 3:
-                try:
-                    from shapely.geometry import MultiPoint
-                    points = MultiPoint(footprint_2d_points)
-                    hull = points.convex_hull
-                    if hull.geom_type == 'Polygon':
-                        footprint_coords_2d = list(hull.exterior.coords)
-                    else:
-                        footprint_coords_2d = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
-                except:
-                    footprint_coords_2d = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
-            else:
-                footprint_coords_2d = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
-        else:
-            # No faces - use bounding box
-            footprint_coords_2d = [(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)]
-        
-        # Create 3D footprint coordinates
-        footprint_coords = [[x, y, min_z] for x, y in footprint_coords_2d]
-        footprint_coords.append(footprint_coords[0])  # Close ring
-        
-        # Create GeoJSON MultiPolygon with 3D coordinates
-        geometry_json = {
-            "type": "MultiPolygon",
-            "coordinates": [[footprint_coords]]
-        }
-        
-        # Create Shapely geometry (2D for compatibility)
+        # Create 2D footprint for spatial queries (convex hull of all points)
         try:
-            geom_shape = Polygon(footprint_coords_2d)
-            if not geom_shape.is_valid:
-                geom_shape = geom_shape.buffer(0)
+            from shapely.geometry import MultiPoint
+            points_2d = [(v[0], v[1]) for v in vertices]
+            mp = MultiPoint(points_2d)
+            hull = mp.convex_hull
+            if hull.geom_type == 'Polygon':
+                geom_shape = hull
+            else:
+                geom_shape = Polygon([
+                    (min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)
+                ])
         except:
-            # Fallback to bounding box
             geom_shape = Polygon([
                 (min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)
             ])
         
+        if not geom_shape.is_valid:
+            geom_shape = geom_shape.buffer(0)
+        
         attrs = building_attributes[idx] if building_attributes and idx < len(building_attributes) else {}
+        attrs = attrs.copy() if attrs else {}
         if 'height' not in attrs:
             attrs['height'] = max_z - min_z if max_z > min_z else 10.0
         
+        # Store full mesh data for proper 3D IFC creation
         buildings.append({
             "geometry": geom_shape,
-            "geometry_json": geometry_json,
+            "mesh_vertices": vertices,   # Full 3D vertices
+            "mesh_faces": faces,         # Triangle face indices
             "attributes": attrs,
             "layer": "ch.swisstopo.swissbuildings3d_3_0",
             "has_z": True,
+            "has_mesh": True,
             "min_z": min_z,
             "max_z": max_z
         })
@@ -1043,6 +1059,84 @@ def download_and_parse_b3dm(tile_url):
     except Exception as e:
         print(f"    Error downloading/parsing b3dm: {e}")
         return [], {}, {}
+
+
+def _process_single_tile(tile_url, tile_uri, region, base_url, center_x, center_y, radius):
+    """
+    Process a single 3D tile: download, parse, transform, and filter buildings.
+    Returns list of buildings that are within the radius.
+    """
+    try:
+        print(f"    Downloading tile: {tile_uri}")
+        result = download_and_parse_b3dm(tile_url)
+        
+        if isinstance(result, tuple) and len(result) == 3:
+            meshes, feature_table, batch_table = result
+        else:
+            meshes, feature_table, batch_table = result, {}, {}
+        
+        if not meshes or len(meshes) == 0:
+            return []
+        
+        print(f"      Parsed {len(meshes)} meshes from tile {tile_uri}")
+        
+        # Extract RTC_CENTER from feature table if available
+        rtc_center = None
+        if feature_table and isinstance(feature_table, dict):
+            rtc_center = feature_table.get('RTC_CENTER')
+            if rtc_center:
+                print(f"      Using RTC_CENTER: {rtc_center[:3] if len(rtc_center) >= 3 else rtc_center}")
+        
+        # Transform coordinates
+        transformed_meshes = []
+        for mesh in meshes:
+            vertices = mesh.get('vertices', [])
+            if not vertices:
+                continue
+                
+            if region:
+                transformed_vertices = transform_tile_to_lv95(vertices, None, region, rtc_center=rtc_center)
+            else:
+                # Use vertices as-is if no region (they should already be in correct CRS)
+                transformed_vertices = vertices
+            
+            if transformed_vertices and len(transformed_vertices) > 0:
+                transformed_mesh = mesh.copy()
+                transformed_mesh['vertices'] = transformed_vertices
+                transformed_meshes.append(transformed_mesh)
+        
+        if not transformed_meshes:
+            return []
+        
+        # Convert to GeoJSON
+        building_attrs = []
+        if batch_table and isinstance(batch_table, dict):
+            if 'id' in batch_table:
+                ids = batch_table['id']
+                if isinstance(ids, list):
+                    building_attrs = [{'egid': str(id)} for id in ids]
+        
+        buildings = meshes_to_geojson(transformed_meshes, building_attrs if building_attrs else None)
+        
+        # Filter by radius
+        circle = Point(center_x, center_y).buffer(radius)
+        filtered_buildings = []
+        for building in buildings:
+            geom = building.get('geometry')
+            if not geom:
+                continue
+            
+            try:
+                # Check if geometry intersects circle
+                if circle.intersects(geom):
+                    filtered_buildings.append(building)
+            except Exception:
+                continue
+        
+        return filtered_buildings
+    except Exception as e:
+        print(f"      Error processing tile {tile_uri}: {e}")
+        return []
 
 
 def fetch_buildings_from_3d_tiles(center_x, center_y, radius, max_buildings=250):
@@ -1271,7 +1365,10 @@ def fetch_buildings_from_3d_tiles(center_x, center_y, radius, max_buildings=250)
     
     # Download and parse tiles (limit for performance)
     max_tiles = 50  # Increased limit to get more buildings
-    print(f"  Downloading up to {max_tiles} closest tiles (out of {len(tiles_to_download)} total)")
+    print(f"  Downloading up to {max_tiles} closest tiles (out of {len(tiles_to_download)} total) in parallel...")
+    
+    # Prepare tile URLs and metadata for parallel processing
+    tile_tasks = []
     for dist, tile_info in tile_distances[:max_tiles]:
         # Handle tuple format: (uri, region, base_url) or (uri, region)
         if len(tile_info) == 3:
@@ -1290,92 +1387,39 @@ def fetch_buildings_from_3d_tiles(center_x, center_y, radius, max_buildings=250)
             else:
                 tile_url = f"{base_url}/{tile_uri}"
         
-        print(f"    Downloading tile: {tile_uri}")
-        result = download_and_parse_b3dm(tile_url)
+        tile_tasks.append((tile_url, tile_uri, region, base_url))
+    
+    # Process tiles in parallel
+    max_workers = 10  # Limit concurrent downloads to avoid overwhelming the server
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_tile = {
+            executor.submit(_process_single_tile, tile_url, tile_uri, region, base_url, center_x, center_y, radius): tile_uri
+            for tile_url, tile_uri, region, base_url in tile_tasks
+        }
         
-        if isinstance(result, tuple) and len(result) == 3:
-            meshes, feature_table, batch_table = result
-        else:
-            meshes, feature_table, batch_table = result, {}, {}
-        
-        if meshes and len(meshes) > 0:
-            print(f"      Parsed {len(meshes)} meshes from tile")
-            # Transform coordinates
-            transformed_meshes = []
-            for mesh in meshes:
-                vertices = mesh.get('vertices', [])
-                if not vertices:
-                    print(f"        Mesh has no vertices")
-                    continue
-                    
-                print(f"        Mesh has {len(vertices)} vertices, {len(mesh.get('faces', []))} faces")
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_tile):
+            tile_uri = future_to_tile[future]
+            try:
+                buildings_from_tile = future.result()
+                all_buildings.extend(buildings_from_tile)
+                if buildings_from_tile:
+                    print(f"      Tile {tile_uri}: added {len(buildings_from_tile)} buildings")
                 
-                if region:
-                    # Debug: show region and vertex ranges
-                    if len(transformed_meshes) == 0:  # Only print for first mesh
-                        x_coords = [v[0] for v in vertices]
-                        y_coords = [v[1] for v in vertices]
-                        print(f"        Vertex range: X=[{min(x_coords):.2f}, {max(x_coords):.2f}], Y=[{min(y_coords):.2f}, {max(y_coords):.2f}]")
-                        print(f"        Region: {region[:4] if len(region) >= 4 else 'N/A'}")
-                    
-                    transformed_vertices = transform_tile_to_lv95(vertices, None, region)
-                    
-                    # Debug: show transformed range
-                    if len(transformed_meshes) == 0 and transformed_vertices:
-                        tx_coords = [v[0] for v in transformed_vertices]
-                        ty_coords = [v[1] for v in transformed_vertices]
-                        print(f"        Transformed range: X=[{min(tx_coords):.2f}, {max(tx_coords):.2f}], Y=[{min(ty_coords):.2f}, {max(ty_coords):.2f}]")
-                else:
-                    # Use vertices as-is if no region (they should already be in correct CRS)
-                    transformed_vertices = vertices
-                
-                if transformed_vertices and len(transformed_vertices) > 0:
-                    transformed_mesh = mesh.copy()
-                    transformed_mesh['vertices'] = transformed_vertices
-                    transformed_meshes.append(transformed_mesh)
-            
-            print(f"      Transformed {len(transformed_meshes)} meshes")
-            
-            if transformed_meshes:
-                # Convert to GeoJSON
-                building_attrs = []
-                if batch_table and isinstance(batch_table, dict):
-                    if 'id' in batch_table:
-                        ids = batch_table['id']
-                        if isinstance(ids, list):
-                            building_attrs = [{'egid': str(id)} for id in ids]
-                
-                buildings = meshes_to_geojson(transformed_meshes, building_attrs if building_attrs else None)
-                print(f"      Converted to {len(buildings)} buildings")
-                
-                # Filter by radius
-                circle = Point(center_x, center_y).buffer(radius)
-                print(f"      Filtering buildings within {radius}m of ({center_x}, {center_y})")
-                for idx, building in enumerate(buildings):
-                    geom = building.get('geometry')
-                    if not geom:
-                        print(f"        Building {idx}: No geometry!")
-                        continue
-                    
-                    # Get centroid for debug
-                    try:
-                        centroid = geom.centroid
-                        dist = Point(center_x, center_y).distance(centroid)
-                        print(f"        Building {idx}: centroid=({centroid.x:.1f}, {centroid.y:.1f}), distance={dist:.1f}m", end="")
-                        
-                        # Check if geometry intersects circle
-                        if circle.intersects(geom):
-                            print(" - INCLUDED")
-                            all_buildings.append(building)
-                            if len(all_buildings) >= max_buildings:
-                                break
-                        else:
-                            print(" - OUTSIDE")
-                    except Exception as e:
-                        print(f"        Building {idx}: Error getting centroid: {e}")
-        
-        if len(all_buildings) >= max_buildings:
-            break
+                # Stop early if we have enough buildings
+                if len(all_buildings) >= max_buildings:
+                    print(f"  Reached max_buildings limit ({max_buildings}), stopping tile processing")
+                    # Cancel remaining tasks
+                    for f in future_to_tile:
+                        f.cancel()
+                    break
+            except Exception as e:
+                print(f"      Tile {tile_uri} generated an exception: {e}")
+    
+    # Limit to max_buildings if we exceeded it
+    if len(all_buildings) > max_buildings:
+        all_buildings = all_buildings[:max_buildings]
     
     print(f"  Extracted {len(all_buildings)} buildings from 3D Tiles")
     return all_buildings
@@ -1561,17 +1605,62 @@ def prepare_building_geometries(building_features, terrain_coords, terrain_eleva
     """Normalize swissBUILDINGS3D geometries for IFC creation."""
     prepared = []
     terrain_index = TerrainIndex(terrain_coords, terrain_elevations)
+    
+    # The raw Z values in 3D Tiles represent height RELATIVE TO LOCAL TERRAIN:
+    # - Negative Z = basement (below terrain)
+    # - Zero = ground level
+    # - Positive Z = above terrain
+    #
+    # The correct formula is: final_z = raw_z + terrain_orthometric
+    # We do NOT use min_h from the region - it's just a bounding box minimum!
+    
+    print(f"  Using terrain-based Z positioning (raw_z + terrain_elevation)")
+    
+    debug_count = 0
     for feature in building_features:
-        geom_json = feature["geometry_json"]
-        has_z = _geometry_has_z(geom_json.get("coordinates", []))
-        min_z, max_z = _collect_z_range_from_geojson(geom_json) if has_z else (None, None)
-
         attrs = feature.get("attributes", {})
         geom_shape = feature["geometry"]
-
-        base_z = min_z if min_z is not None else terrain_index.nearest_height(
-            geom_shape.centroid.x, geom_shape.centroid.y, default=0.0
+        
+        # Check if this building has full mesh data (from 3D Tiles)
+        has_mesh = feature.get("has_mesh", False)
+        mesh_vertices = feature.get("mesh_vertices", [])
+        mesh_faces = feature.get("mesh_faces", [])
+        
+        # Get terrain elevation at building centroid (orthometric LN02)
+        terrain_elevation = terrain_index.nearest_height(
+            geom_shape.centroid.x, geom_shape.centroid.y, default=600.0
         )
+        
+        if has_mesh and mesh_vertices:
+            # Get Z range from mesh vertices
+            # Raw Z represents height relative to local terrain
+            # final_z = raw_z + terrain_elevation
+            z_coords = [v[2] for v in mesh_vertices]
+            raw_min_z = min(z_coords)
+            raw_max_z = max(z_coords)
+            
+            # Calculate actual heights by adding terrain
+            min_z = raw_min_z + terrain_elevation
+            max_z = raw_max_z + terrain_elevation
+            has_z = True
+            
+            # The Z adjustment IS the terrain elevation
+            # (raw_z is relative to terrain, so we add terrain to get absolute)
+            z_offset_adjustment = terrain_elevation
+            
+            if debug_count < 3:
+                print(f"    Building: raw_z=[{raw_min_z:.1f},{raw_max_z:.1f}], terrain={terrain_elevation:.1f}m, final_z=[{min_z:.1f},{max_z:.1f}]")
+                debug_count += 1
+        else:
+            # Fall back to GeoJSON-based approach
+            geom_json = feature.get("geometry_json", {})
+            has_z = _geometry_has_z(geom_json.get("coordinates", []))
+            raw_min_z, raw_max_z = _collect_z_range_from_geojson(geom_json) if has_z else (None, None)
+            min_z = raw_min_z
+            max_z = raw_max_z
+            z_offset_adjustment = 0.0
+
+        base_z = min_z if min_z is not None else terrain_elevation
         height = (max_z - min_z) if (min_z is not None and max_z is not None) else _estimate_building_height(attrs)
 
         building_id = (
@@ -1582,8 +1671,7 @@ def prepare_building_geometries(building_features, terrain_coords, terrain_eleva
             or f"building_{len(prepared) + 1}"
         )
 
-        prepared.append({
-            "geometry_json": geom_json,
+        building_data = {
             "shape": geom_shape,
             "attributes": attrs,
             "layer": feature.get("layer", ""),
@@ -1594,7 +1682,19 @@ def prepare_building_geometries(building_features, terrain_coords, terrain_eleva
             "max_z": max_z if max_z is not None else base_z + height,
             "id": str(building_id),
             "separate_elements": separate_elements,
-        })
+            "terrain_elevation": terrain_elevation,
+            "z_offset_adjustment": z_offset_adjustment,
+        }
+        
+        # Include mesh data if available (NOT modified - keep original geometry)
+        if has_mesh and mesh_vertices:
+            building_data["has_mesh"] = True
+            building_data["mesh_vertices"] = mesh_vertices
+            building_data["mesh_faces"] = mesh_faces
+        else:
+            building_data["geometry_json"] = feature.get("geometry_json", {})
+        
+        prepared.append(building_data)
     return prepared
 
 
@@ -1682,6 +1782,47 @@ def _create_faces_from_geojson(model, geometry_json, offset_x, offset_y, offset_
     return faces
 
 
+def _create_faces_from_mesh(model, mesh_vertices, mesh_faces, offset_x, offset_y, offset_z, z_adjustment=0.0):
+    """Create IFC faces from mesh triangles (from 3D Tiles).
+    
+    Args:
+        z_adjustment: Additional Z offset to apply (to align building with terrain)
+    
+    Returns list of IfcFace objects.
+    """
+    ifc_faces = []
+    
+    if not mesh_vertices or not mesh_faces:
+        return ifc_faces
+    
+    for face_indices in mesh_faces:
+        if len(face_indices) < 3:
+            continue
+        
+        try:
+            # Get vertices for this face
+            face_vertices = []
+            for vi in face_indices:
+                if vi < len(mesh_vertices):
+                    v = mesh_vertices[vi]
+                    # Convert to local coordinates, applying Z adjustment
+                    lx = float(v[0] - offset_x)
+                    ly = float(v[1] - offset_y)
+                    lz = float(v[2] + z_adjustment - offset_z)
+                    face_vertices.append(model.createIfcCartesianPoint([lx, ly, lz]))
+            
+            if len(face_vertices) >= 3:
+                poly_loop = model.createIfcPolyLoop(face_vertices)
+                face_bound = model.createIfcFaceOuterBound(poly_loop, True)
+                ifc_face = model.createIfcFace([face_bound])
+                ifc_faces.append(ifc_face)
+        except Exception as e:
+            # Skip problematic faces
+            continue
+    
+    return ifc_faces
+
+
 def _create_extruded_building_shell(model, polygon, base_z, height, offset_x, offset_y, offset_z):
     """Create a closed shell for an extruded building volume."""
     if height is None or height <= 0:
@@ -1759,7 +1900,7 @@ def _attach_building_metadata(model, owner_history, set_owner_history_on_pset, p
     product.OwnerHistory = owner_history
 
 
-def _create_surface_element(model, body_context, owner_history, set_owner_history_on_pset, site, base_local, name, faces):
+def _create_surface_element(model, body_context, owner_history, site, base_local, name, faces):
     shell = model.createIfcOpenShell(faces)
     shell_model = model.createIfcShellBasedSurfaceModel([shell])
     shape_rep = model.createIfcShapeRepresentation(
@@ -2439,7 +2580,7 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
                     if not cls_faces:
                         continue
                     element = _create_surface_element(
-                        model, body_context, owner_history, set_owner_history_on_pset, site, base_local,
+                        model, body_context, owner_history, site, base_local,
                         f"{building_name}_{cls_name.lower()}", cls_faces
                     )
                     element.ObjectType = f"Building_{cls_name}"
@@ -2456,7 +2597,24 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
             ifcopenshell.api.run("spatial.assign_container", model, products=[building_elem], relating_structure=site)
 
             rep = None
-            if building.get("has_z"):
+            # Check if we have full mesh data (from 3D Tiles)
+            if building.get("has_mesh"):
+                mesh_vertices = building.get("mesh_vertices", [])
+                mesh_faces = building.get("mesh_faces", [])
+                z_adjustment = building.get("z_offset_adjustment", 0.0)
+                if mesh_vertices and mesh_faces:
+                    ifc_faces = _create_faces_from_mesh(
+                        model, mesh_vertices, mesh_faces, offset_x, offset_y, offset_z, z_adjustment
+                    )
+                    if ifc_faces:
+                        shell = model.createIfcOpenShell(ifc_faces)
+                        shell_model = model.createIfcShellBasedSurfaceModel([shell])
+                        shape_rep = model.createIfcShapeRepresentation(
+                            body_context, "Body", "SurfaceModel", [shell_model]
+                        )
+                        rep = model.createIfcProductDefinitionShape(None, None, [shape_rep])
+                        print(f"  Building {idx}: created {len(ifc_faces)} faces from 3D mesh")
+            elif building.get("has_z"):
                 faces = _create_faces_from_geojson(
                     model, building["geometry_json"], offset_x, offset_y, offset_z, building.get("base_z", 0.0)
                 )

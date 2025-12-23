@@ -5,7 +5,7 @@ Terrain Loader for Swiss Cadastre Surroundings
 This script fetches terrain data for the surroundings of a site from the Swiss
 geo.admin.ch elevation API and creates a valid IFC terrain surface.
 
-This is an additional module that does not modify the existing workflow.py setup.
+This is an additional module that does not modify the existing site_boundary_workflow.py setup.
 
 Usage:
     python terrain_loader.py --egrid CH999979659148 --buffer 100 --resolution 10 --output terrain.ifc

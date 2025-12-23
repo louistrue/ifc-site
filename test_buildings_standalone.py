@@ -28,7 +28,6 @@ RADIUS = 2000  # 2km radius to catch more buildings
 # Find a tile near center dynamically
 def find_tile_near_center(center_x, center_y, radius_m=5000):
     """Find a tile near the center coordinates"""
-    import requests
     import math
     from pyproj import Transformer
     
@@ -198,14 +197,14 @@ def test_single_tile():
             project = ifcopenshell.api.run("root.create_entity", model, ifc_class="IfcProject", name="Test Project")
             
             site = ifcopenshell.api.run("root.create_entity", model, ifc_class="IfcSite", name="Test Site")
-            ifcopenshell.api.run("aggregate.assign_object", model, relating_object=project, product=site)
+            ifcopenshell.api.run("aggregate.assign_object", model, relating_object=project, products=[site])
             
             # Prepare building geometries (simplified - just create building elements)
             building_count = 0
             for building in included:
                 try:
                     building_elem = ifcopenshell.api.run("root.create_entity", model, ifc_class="IfcBuilding", name=f"Building_{building_count}")
-                    ifcopenshell.api.run("aggregate.assign_object", model, relating_object=site, product=building_elem)
+                    ifcopenshell.api.run("aggregate.assign_object", model, relating_object=site, products=[building_elem])
                     building_count += 1
                 except:
                     pass

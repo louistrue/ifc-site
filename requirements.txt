@@ -5,6 +5,6 @@ numpy
 pyproj>=3.0.0
 ifcopenshell
 requests
-pygltflib>=2.0.0
-DracoPy>=2.0.0
+pygltflib>=1.16.5,<2.0.0
+DracoPy>=1.4.1,<2.0.0
 trimesh>=4.0.0
