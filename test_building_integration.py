@@ -77,8 +77,7 @@ def test_building_to_ifc_conversion():
             site=site,
             body_context=body_context,
             footprint_context=footprint_context,
-            base_elevation=0.0,
-            use_extrusion=True
+            base_elevation=0.0
         )
 
         # Verify

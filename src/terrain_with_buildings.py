@@ -36,7 +36,6 @@ def run_terrain_with_buildings_workflow(
     include_site_solid: bool = True,
     include_buildings: bool = True,
     building_buffer_m: float = 0.0,
-    building_use_extrusion: bool = True,
     output_path: str = "terrain_with_buildings.ifc",
 ) -> str:
     """
@@ -53,7 +52,6 @@ def run_terrain_with_buildings_workflow(
         include_site_solid: Include site boundary solid
         include_buildings: Include building footprints and 3D models
         building_buffer_m: Buffer around parcel to include buildings (meters)
-        building_use_extrusion: Use extrusion (True) or BRep (False) for buildings
         output_path: Output IFC file path
 
     Returns:
@@ -116,8 +114,7 @@ def run_terrain_with_buildings_workflow(
             add_buildings_to_ifc(
                 ifc_path=base_output,
                 buildings=buildings,
-                output_path=output_path,
-                use_extrusion=building_use_extrusion
+                output_path=output_path
             )
 
             print(f"\n✅ Successfully added {len(buildings)} buildings to IFC")
@@ -144,8 +141,7 @@ def run_terrain_with_buildings_workflow(
 def add_buildings_to_ifc(
     ifc_path: str,
     buildings: List[BuildingFeature],
-    output_path: str,
-    use_extrusion: bool = True
+    output_path: str
 ):
     """
     Add buildings to an existing IFC file
@@ -154,7 +150,6 @@ def add_buildings_to_ifc(
         ifc_path: Path to existing IFC file
         buildings: List of BuildingFeature objects
         output_path: Path for output IFC file
-        use_extrusion: Use extrusion vs BRep for 3D
     """
     # Load existing IFC file
     print(f"   Loading IFC file: {ifc_path}")
@@ -207,8 +202,7 @@ def add_buildings_to_ifc(
         offset_x=offset_x,
         offset_y=offset_y,
         offset_z=offset_z,
-        base_elevation=base_elevation,
-        use_extrusion=use_extrusion
+        base_elevation=base_elevation
     )
 
     # Save modified IFC
@@ -245,8 +239,6 @@ def main():
                         help="Include building footprints and 3D models")
     parser.add_argument("--building-buffer", type=float, default=0.0,
                         help="Buffer around parcel to include buildings (meters), default: 0")
-    parser.add_argument("--building-brep", action="store_true",
-                        help="Use BRep instead of extrusion for buildings")
     parser.add_argument("--output", default="terrain_with_buildings.ifc",
                         help="Output IFC file path")
 
@@ -265,7 +257,6 @@ def main():
             include_site_solid=not args.no_site,
             include_buildings=args.include_buildings,
             building_buffer_m=args.building_buffer,
-            building_use_extrusion=not args.building_brep,
             output_path=args.output,
         )
 

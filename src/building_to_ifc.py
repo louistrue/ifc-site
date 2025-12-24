@@ -18,82 +18,144 @@ from src.building_loader import BuildingFeature
 
 logger = logging.getLogger(__name__)
 
+# Default height for buildings without height data (meters)
+DEFAULT_BUILDING_HEIGHT = 10.0
+# Minimum extrusion height to ensure visibility
+MIN_EXTRUSION_HEIGHT = 0.5
 
-def create_building_footprint_representation(
+
+def create_building_footprint_surface(
     model: ifcopenshell.file,
     building: BuildingFeature,
-    footprint_context,
+    body_context,
     offset_x: float = 0.0,
     offset_y: float = 0.0,
+    base_elevation: float = 0.0,
     offset_z: float = 0.0
-) -> ifcopenshell.entity_instance:
+) -> Optional[ifcopenshell.entity_instance]:
     """
-    Create 2D footprint representation for a building
-
-    Args:
-        model: IFC model
-        building: BuildingFeature to convert
-        footprint_context: IFC FootPrint context
-        offset_x, offset_y, offset_z: Project origin offsets
-
-    Returns:
-        IfcShapeRepresentation for footprint
+    Create a visible 3D surface for the building footprint (flat polygon at ground level)
+    
+    This ensures buildings are visible even without height data.
     """
-    # Get exterior coordinates
-    coords = list(building.geometry.exterior.coords)
-
-    # Apply offsets and convert to 2D
-    footprint_points = [
-        model.createIfcCartesianPoint([
-            float(x - offset_x),
-            float(y - offset_y)
-        ])
-        for x, y in coords
-    ]
-
-    # Create polyline
-    polyline = model.createIfcPolyLine(footprint_points)
-
-    # Create shape representation
+    if building.geometry is None or building.geometry.is_empty:
+        return None
+    
+    try:
+        coords = list(building.geometry.exterior.coords)
+    except Exception as e:
+        logger.warning(f"Building {building.id} has invalid geometry: {e}")
+        return None
+    
+    if len(coords) < 3:
+        return None
+    
+    # Remove duplicate closing point if present
+    if coords[0] == coords[-1]:
+        coords = coords[:-1]
+    
+    if len(coords) < 3:
+        return None
+    
+    # Create polygon at base elevation
+    z = float(base_elevation - offset_z)
+    
+    # Triangulate the polygon for proper surface representation
+    polygon_2d = Polygon([(x - offset_x, y - offset_y) for x, y in coords])
+    if not polygon_2d.is_valid:
+        polygon_2d = polygon_2d.buffer(0)
+    if polygon_2d.is_empty:
+        return None
+    
+    faces = []
+    
+    # Triangulate and create faces
+    try:
+        for tri in triangulate(polygon_2d):
+            if not polygon_2d.contains(tri.centroid):
+                continue
+            
+            oriented_tri = orient(tri, sign=1.0)
+            tri_coords = list(oriented_tri.exterior.coords)[:-1]
+            
+            if len(tri_coords) < 3:
+                continue
+            
+            tri_points = [
+                model.createIfcCartesianPoint([float(x), float(y), z])
+                for x, y in tri_coords
+            ]
+            
+            tri_loop = model.createIfcPolyLoop(tri_points)
+            faces.append(model.createIfcFace([
+                model.createIfcFaceOuterBound(tri_loop, True)
+            ]))
+    except Exception as e:
+        logger.warning(f"Failed to triangulate building {building.id}: {e}")
+        return None
+    
+    if not faces:
+        return None
+    
+    # Create shell surface
+    shell = model.createIfcOpenShell(faces)
+    surface = model.createIfcShellBasedSurfaceModel([shell])
+    
     rep = model.createIfcShapeRepresentation(
-        footprint_context,
-        "FootPrint",
-        "Curve2D",
-        [polyline]
+        body_context,
+        "Body",
+        "SurfaceModel",
+        [surface]
     )
-
+    
     return rep
 
 
-def create_building_extrusion_representation(
+def create_building_extrusion(
     model: ifcopenshell.file,
     building: BuildingFeature,
     body_context,
     offset_x: float = 0.0,
     offset_y: float = 0.0,
     offset_z: float = 0.0,
-    base_elevation: float = 0.0
+    base_elevation: float = 0.0,
+    height: float = DEFAULT_BUILDING_HEIGHT
 ) -> Optional[ifcopenshell.entity_instance]:
     """
     Create 3D extruded solid representation for a building
-
+    
     Args:
         model: IFC model
         building: BuildingFeature to convert
         body_context: IFC Body context
         offset_x, offset_y, offset_z: Project origin offsets
         base_elevation: Base elevation for extrusion
+        height: Building height in meters
 
     Returns:
-        IfcShapeRepresentation for solid or None if no height available
+        IfcShapeRepresentation for solid or None if geometry invalid
     """
-    if not building.height or building.height <= 0:
+    if building.geometry is None or building.geometry.is_empty:
+        logger.warning(f"Building {building.id} has empty geometry")
         return None
 
-    # Get exterior coordinates
-    coords = list(building.geometry.exterior.coords)
+    try:
+        coords = list(building.geometry.exterior.coords)
+    except Exception as e:
+        logger.warning(f"Building {building.id} has invalid geometry: {e}")
+        return None
+    
+    if len(coords) < 3:
+        logger.warning(f"Building {building.id} has too few coordinates ({len(coords)})")
+        return None
+    
+    # Remove duplicate closing point
     if coords[0] == coords[-1]:
-        coords = coords[:-1]  # Remove duplicate closing point
+        coords = coords[:-1]
+    
+    if len(coords) < 3:
+        logger.warning(f"Building {building.id} has too few unique coordinates")
+        return None
 
     # Apply offsets
     coords_2d = [
@@ -130,7 +192,7 @@ def create_building_extrusion_representation(
         profile,
         position,
         model.createIfcDirection([0.0, 0.0, 1.0]),
-        float(building.height)
+        float(height)
     )
 
     # Create shape representation
@@ -144,118 +206,42 @@ def create_building_extrusion_representation(
     return rep
 
 
-def create_building_brep_representation(
+def create_building_footprint_curve(
     model: ifcopenshell.file,
     building: BuildingFeature,
-    body_context,
+    footprint_context,
     offset_x: float = 0.0,
-    offset_y: float = 0.0,
-    offset_z: float = 0.0,
-    base_elevation: float = 0.0
+    offset_y: float = 0.0
 ) -> Optional[ifcopenshell.entity_instance]:
     """
-    Create 3D BRep solid representation for a building
-
-    Similar to site_solid.py approach: triangulated top + skirt + bottom
-    More accurate for non-rectangular buildings or when height varies
-
-    Args:
-        model: IFC model
-        building: BuildingFeature to convert
-        body_context: IFC Body context
-        offset_x, offset_y, offset_z: Project origin offsets
-        base_elevation: Base elevation for the solid
-
-    Returns:
-        IfcShapeRepresentation for solid or None if no height available
+    Create 2D footprint curve representation
     """
-    if not building.height or building.height <= 0:
+    if building.geometry is None or building.geometry.is_empty:
+        return None
+    
+    try:
+        coords = list(building.geometry.exterior.coords)
+    except:
+        return None
+    
+    if len(coords) < 3:
         return None
 
-    # Get exterior coordinates
-    coords = list(building.geometry.exterior.coords)
-    if coords[0] == coords[-1]:
-        coords = coords[:-1]
-
-    # Apply offsets and set height
-    top_elevation = base_elevation + building.height
-    coords_3d = [
-        (float(x - offset_x), float(y - offset_y), float(top_elevation - offset_z))
+    footprint_points = [
+        model.createIfcCartesianPoint([
+            float(x - offset_x),
+            float(y - offset_y)
+        ])
         for x, y in coords
     ]
 
-    # Create polygon for triangulation
-    polygon_2d = Polygon([(x, y) for x, y, _ in coords_3d])
-    if not polygon_2d.is_valid:
-        polygon_2d = polygon_2d.buffer(0)
-    if polygon_2d.is_empty:
-        logger.warning(f"Invalid building footprint for {building.id}, skipping BRep")
-        return None
+    polyline = model.createIfcPolyLine(footprint_points)
 
-    faces = []
-
-    # Create triangulated top face
-    for tri in triangulate(polygon_2d):
-        if not polygon_2d.contains(tri.centroid):
-            continue
-
-        oriented_tri = orient(tri, sign=1.0)
-        tri_coords = list(oriented_tri.exterior.coords)[:-1]
-
-        tri_points = [
-            model.createIfcCartesianPoint([
-                float(x),
-                float(y),
-                float(top_elevation - offset_z)
-            ])
-            for x, y in tri_coords
-        ]
-
-        tri_loop = model.createIfcPolyLoop(tri_points)
-        faces.append(model.createIfcFace([
-            model.createIfcFaceOuterBound(tri_loop, True)
-        ]))
-
-    # Create side faces (skirt)
-    base_z = float(base_elevation - offset_z)
-    top_z = float(top_elevation - offset_z)
-
-    for i in range(len(coords_3d)):
-        p1 = coords_3d[i]
-        p2 = coords_3d[(i + 1) % len(coords_3d)]
-
-        side_pts = [
-            model.createIfcCartesianPoint([p1[0], p1[1], top_z]),
-            model.createIfcCartesianPoint([p1[0], p1[1], base_z]),
-            model.createIfcCartesianPoint([p2[0], p2[1], base_z]),
-            model.createIfcCartesianPoint([p2[0], p2[1], top_z])
-        ]
-
-        side_loop = model.createIfcPolyLoop(side_pts)
-        faces.append(model.createIfcFace([
-            model.createIfcFaceOuterBound(side_loop, True)
-        ]))
-
-    # Create bottom face
-    bot_points = [
-        model.createIfcCartesianPoint([x, y, base_z])
-        for x, y, _ in reversed(coords_3d)
-    ]
-    bot_loop = model.createIfcPolyLoop(bot_points)
-    faces.append(model.createIfcFace([
-        model.createIfcFaceOuterBound(bot_loop, True)
-    ]))
-
-    # Create closed shell and solid
-    shell = model.createIfcClosedShell(faces)
-    solid = model.createIfcFacetedBrep(shell)
-
-    # Create shape representation
     rep = model.createIfcShapeRepresentation(
-        body_context,
-        "Body",
-        "Brep",
-        [solid]
+        footprint_context,
+        "FootPrint",
+        "Curve2D",
+        [polyline]
     )
 
     return rep
@@ -264,17 +250,13 @@ def create_building_brep_representation(
 def add_building_properties(
     model: ifcopenshell.file,
     ifc_building: ifcopenshell.entity_instance,
-    building: BuildingFeature
+    building: BuildingFeature,
+    height_used: float,
+    height_source: str
 ):
     """
     Add property sets to IFC building
-
-    Args:
-        model: IFC model
-        ifc_building: IfcBuilding element
-        building: BuildingFeature with attribute data
     """
-    # Create property set for building data
     pset = ifcopenshell.api.run(
         "pset.add_pset",
         model,
@@ -282,12 +264,11 @@ def add_building_properties(
         name="Pset_BuildingCommon"
     )
 
-    # Add properties
-    properties = {}
-
-    if building.height:
-        properties["GrossPlannedArea"] = building.geometry.area
-        properties["TotalHeight"] = building.height
+    properties = {
+        "GrossPlannedArea": building.geometry.area if building.geometry else 0,
+        "TotalHeight": height_used,
+        "HeightSource": height_source  # "actual", "estimated", or "default"
+    }
 
     if building.building_class:
         properties["BuildingClass"] = building.building_class
@@ -295,15 +276,14 @@ def add_building_properties(
     if building.year_built:
         properties["YearOfConstruction"] = building.year_built
 
-    if properties:
-        ifcopenshell.api.run(
-            "pset.edit_pset",
-            model,
-            pset=pset,
-            properties=properties
-        )
+    ifcopenshell.api.run(
+        "pset.edit_pset",
+        model,
+        pset=pset,
+        properties=properties
+    )
 
-    # Add custom property set for Swiss building attributes
+    # Add Swiss building attributes if available
     if building.attributes:
         pset_swiss = ifcopenshell.api.run(
             "pset.add_pset",
@@ -312,19 +292,20 @@ def add_building_properties(
             name="CPset_SwissBuilding"
         )
 
-        swiss_props = {}
+        swiss_props = {"SourceID": building.id}
         if building.roof_type:
             swiss_props["RoofType"] = building.roof_type
-        if "gebaeudeklasse" in building.attributes:
-            swiss_props["Gebaeudeklasse"] = building.attributes["gebaeudeklasse"]
+        
+        for key in ["egid", "gbauj", "gastw", "garea", "gvol"]:
+            if key in building.attributes:
+                swiss_props[key] = str(building.attributes[key])
 
-        if swiss_props:
-            ifcopenshell.api.run(
-                "pset.edit_pset",
-                model,
-                pset=pset_swiss,
-                properties=swiss_props
-            )
+        ifcopenshell.api.run(
+            "pset.edit_pset",
+            model,
+            pset=pset_swiss,
+            properties=swiss_props
+        )
 
 
 def building_to_ifc(
@@ -337,10 +318,10 @@ def building_to_ifc(
     offset_y: float = 0.0,
     offset_z: float = 0.0,
     base_elevation: float = 0.0,
-    use_extrusion: bool = True
-) -> ifcopenshell.entity_instance:
+    default_height: float = DEFAULT_BUILDING_HEIGHT
+) -> Optional[ifcopenshell.entity_instance]:
     """
-    Convert a BuildingFeature to an IfcBuilding element
+    Convert a BuildingFeature to an IfcBuilding element with visible geometry
 
     Args:
         model: IFC model
@@ -350,22 +331,43 @@ def building_to_ifc(
         footprint_context: IFC FootPrint context
         offset_x, offset_y, offset_z: Project origin offsets
         base_elevation: Base elevation for building (ground level)
-        use_extrusion: If True, use simple extrusion; if False, use BRep
+        default_height: Default building height if not provided (meters)
 
     Returns:
-        IfcBuilding element
+        IfcBuilding element or None if failed
     """
+    # Validate geometry first
+    if building.geometry is None or building.geometry.is_empty:
+        logger.warning(f"Skipping building {building.id}: no geometry")
+        return None
+    
+    try:
+        coords = list(building.geometry.exterior.coords)
+        if len(coords) < 3:
+            logger.warning(f"Skipping building {building.id}: too few coordinates")
+            return None
+    except Exception as e:
+        logger.warning(f"Skipping building {building.id}: invalid geometry - {e}")
+        return None
+
+    # Determine height to use
+    if building.height and building.height > 0:
+        height_used = building.height
+        height_source = "actual"
+    else:
+        height_used = default_height
+        height_source = "default"
+
     # Create IfcBuilding
     ifc_building = ifcopenshell.api.run(
         "root.create_entity",
         model,
         ifc_class="IfcBuilding",
-        name=building.id
+        name=str(building.id)
     )
 
-    # Set building description
     if building.building_class:
-        ifc_building.Description = f"{building.building_class}"
+        ifc_building.Description = str(building.building_class)
 
     # Create placement relative to site
     origin = model.createIfcCartesianPoint([0.0, 0.0, 0.0])
@@ -389,38 +391,42 @@ def building_to_ifc(
     # Create representations
     representations = []
 
-    # 1. Footprint representation (always)
-    footprint_rep = create_building_footprint_representation(
-        model, building, footprint_context, offset_x, offset_y, offset_z
+    # 1. Create 3D extruded body (always - ensures visibility)
+    body_rep = create_building_extrusion(
+        model, building, body_context,
+        offset_x, offset_y, offset_z, base_elevation, height_used
     )
-    representations.append(footprint_rep)
+    if body_rep:
+        representations.append(body_rep)
+    else:
+        # Fallback: create surface footprint if extrusion fails
+        surface_rep = create_building_footprint_surface(
+            model, building, body_context,
+            offset_x, offset_y, base_elevation, offset_z
+        )
+        if surface_rep:
+            representations.append(surface_rep)
 
-    # 2. 3D representation (if height available)
-    if building.height and building.height > 0:
-        if use_extrusion:
-            body_rep = create_building_extrusion_representation(
-                model, building, body_context,
-                offset_x, offset_y, offset_z, base_elevation
-            )
-        else:
-            body_rep = create_building_brep_representation(
-                model, building, body_context,
-                offset_x, offset_y, offset_z, base_elevation
-            )
-
-        if body_rep:
-            representations.append(body_rep)
+    # 2. Create 2D footprint curve
+    footprint_rep = create_building_footprint_curve(
+        model, building, footprint_context, offset_x, offset_y
+    )
+    if footprint_rep:
+        representations.append(footprint_rep)
 
     # Assign representation
     if representations:
         ifc_building.Representation = model.createIfcProductDefinitionShape(
             None, None, representations
         )
+    else:
+        logger.warning(f"Building {building.id}: no representations created")
+        return None
 
     # Add properties
-    add_building_properties(model, ifc_building, building)
+    add_building_properties(model, ifc_building, building, height_used, height_source)
 
-    logger.info(f"Created IfcBuilding: {building.id} (height: {building.height}m)")
+    logger.info(f"Created IfcBuilding: {building.id} (height: {height_used}m [{height_source}])")
 
     return ifc_building
 
@@ -435,7 +441,7 @@ def buildings_to_ifc(
     offset_y: float = 0.0,
     offset_z: float = 0.0,
     base_elevation: float = 0.0,
-    use_extrusion: bool = True
+    default_height: float = DEFAULT_BUILDING_HEIGHT
 ) -> List[ifcopenshell.entity_instance]:
     """
     Convert multiple buildings to IFC
@@ -448,7 +454,7 @@ def buildings_to_ifc(
         footprint_context: IFC FootPrint context
         offset_x, offset_y, offset_z: Project origin offsets
         base_elevation: Base elevation for buildings
-        use_extrusion: Use extrusion vs BRep for 3D
+        default_height: Default building height if not provided (meters)
 
     Returns:
         List of IfcBuilding elements
@@ -461,9 +467,10 @@ def buildings_to_ifc(
         try:
             ifc_building = building_to_ifc(
                 model, building, site, body_context, footprint_context,
-                offset_x, offset_y, offset_z, base_elevation, use_extrusion
+                offset_x, offset_y, offset_z, base_elevation, default_height
             )
-            ifc_buildings.append(ifc_building)
+            if ifc_building:
+                ifc_buildings.append(ifc_building)
         except Exception as e:
             logger.error(f"Failed to convert building {building.id}: {e}")
 

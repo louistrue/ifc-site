@@ -69,19 +69,23 @@ class SwissBuildingLoader:
     Load Swiss building data from geo.admin.ch APIs
 
     Supports multiple data sources:
-    - WFS (Web Feature Service) - best for area queries
-    - STAC API - best for bulk tile downloads
-    - REST API - best for point queries
+    - REST API (MapServer Identify) - best for area queries with polygon geometry
+    - STAC API - best for bulk tile downloads of 3D data
+    - WFS (Web Feature Service) - NOT AVAILABLE on Swiss servers
     """
 
     # API Configuration
-    WFS_URL = "https://wms.geo.admin.ch/"
+    WFS_URL = "https://wms.geo.admin.ch/"  # Note: WFS is disabled on this server
     STAC_BASE = "https://data.geo.admin.ch/api/stac/v1"
     REST_BASE = "https://api3.geo.admin.ch/rest/services"
 
     # Layer names
     BUILDINGS_LAYER = "ch.swisstopo.swissbuildings3d_3_0"
     BUILDINGS_LAYER_BETA = "ch.swisstopo.swissbuildings3d_3_0-beta"
+    
+    # Working building layers (with polygon geometry)
+    BUILDINGS_VEC25 = "ch.swisstopo.vec25-gebaeude"  # Vector 25k building footprints
+    BUILDINGS_REGISTER = "ch.bfs.gebaeude_wohnungs_register"  # Building register (point data)
 
     def __init__(
         self,
@@ -264,12 +268,107 @@ class SwissBuildingLoader:
             logger.error(f"STAC request failed: {e}")
             raise
 
+    def get_buildings_rest(
+        self,
+        bbox_2056: Tuple[float, float, float, float],
+        max_features: int = 1000
+    ) -> List[BuildingFeature]:
+        """
+        Get buildings using REST API MapServer Identify endpoint
+        
+        This is the RECOMMENDED method - uses Vector 25k building footprints
+        which provide accurate polygon geometry.
+
+        Args:
+            bbox_2056: Bounding box (min_x, min_y, max_x, max_y) in EPSG:2056
+            max_features: Maximum number of buildings to return
+
+        Returns:
+            List of BuildingFeature objects with polygon geometry
+        """
+        logger.info(f"Fetching buildings via REST API in bbox: {bbox_2056}")
+
+        url = f"{self.REST_BASE}/api/MapServer/identify"
+        params = {
+            "geometryType": "esriGeometryEnvelope",
+            "geometry": f"{bbox_2056[0]},{bbox_2056[1]},{bbox_2056[2]},{bbox_2056[3]}",
+            "layers": f"all:{self.BUILDINGS_VEC25}",
+            "mapExtent": f"{bbox_2056[0]},{bbox_2056[1]},{bbox_2056[2]},{bbox_2056[3]}",
+            "imageDisplay": "1000,1000,96",
+            "tolerance": 0,
+            "returnGeometry": "true",
+            "geometryFormat": "geojson",
+            "sr": "2056"
+        }
+
+        try:
+            response = self._request_with_retry(url, params)
+            data = response.json()
+
+            buildings = []
+            for result in data.get("results", []):
+                building = self._parse_rest_result(result)
+                if building:
+                    buildings.append(building)
+
+            logger.info(f"Retrieved {len(buildings)} buildings via REST API")
+            return buildings
+
+        except Exception as e:
+            logger.error(f"REST API request failed: {e}")
+            raise
+
+    def _parse_rest_result(self, result: Dict) -> Optional[BuildingFeature]:
+        """
+        Parse a REST API identify result into BuildingFeature
+
+        Args:
+            result: REST API result dict
+
+        Returns:
+            BuildingFeature or None if invalid
+        """
+        try:
+            # Parse geometry
+            geom_data = result.get("geometry", {})
+            if not geom_data:
+                return None
+                
+            geom = shape(geom_data)
+
+            # Handle MultiPolygon by taking the largest polygon
+            if geom.geom_type == "MultiPolygon":
+                largest = max(geom.geoms, key=lambda p: p.area)
+                geom = largest
+
+            # Extract to 2D if 3D
+            if geom.has_z:
+                geom = Polygon([(x, y) for x, y, *_ in geom.exterior.coords])
+
+            # Extract properties
+            attrs = result.get("attributes", {})
+            feature_id = str(result.get("id", attrs.get("id", "unknown")))
+
+            return BuildingFeature(
+                id=feature_id,
+                geometry=geom,
+                height=None,  # Vec25 doesn't have height data
+                building_class=result.get("layerName"),
+                roof_type=None,
+                year_built=None,
+                attributes=attrs
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to parse REST result: {e}")
+            return None
+
     def get_buildings_around_point(
         self,
         x: float,
         y: float,
         radius: float = 500,
-        method: Literal["wfs", "stac"] = "wfs"
+        method: Literal["rest", "wfs", "stac"] = "rest"
     ) -> List[BuildingFeature]:
         """
         Get buildings within radius of a point
@@ -278,7 +377,7 @@ class SwissBuildingLoader:
             x: X coordinate in EPSG:2056
             y: Y coordinate in EPSG:2056
             radius: Radius in meters
-            method: API method to use
+            method: API method to use ("rest" recommended, "wfs" disabled, "stac" returns tiles)
 
         Returns:
             List of BuildingFeature objects
@@ -286,8 +385,8 @@ class SwissBuildingLoader:
         # Create bbox
         bbox = (x - radius, y - radius, x + radius, y + radius)
 
-        if method == "wfs":
-            buildings = self.get_buildings_wfs(bbox)
+        if method == "rest":
+            buildings = self.get_buildings_rest(bbox)
 
             # Filter to circular area
             center = shape({"type": "Point", "coordinates": [x, y]})
@@ -298,6 +397,10 @@ class SwissBuildingLoader:
 
             logger.info(f"Filtered {len(filtered)}/{len(buildings)} buildings within {radius}m radius")
             return filtered
+
+        elif method == "wfs":
+            logger.warning("WFS is disabled on Swiss geo.admin.ch - using REST API instead")
+            return self.get_buildings_around_point(x, y, radius, method="rest")
 
         elif method == "stac":
             tiles = self.get_buildings_stac(bbox)
@@ -328,10 +431,13 @@ class SwissBuildingLoader:
         logger.info(f"Fetching buildings for EGRID: {egrid}")
 
         # Import here to avoid circular dependency
-        from src.site_solid import get_site_boundary_from_api
+        from src.terrain_with_site import fetch_boundary_by_egrid
 
         # Get parcel boundary using existing function
-        site_boundary, metadata = get_site_boundary_from_api(egrid)
+        site_boundary, metadata = fetch_boundary_by_egrid(egrid)
+        if site_boundary is None:
+            logger.warning(f"No boundary found for EGRID {egrid}")
+            return []
 
         # Create bbox with buffer
         bounds = site_boundary.bounds  # (minx, miny, maxx, maxy)
@@ -342,8 +448,8 @@ class SwissBuildingLoader:
             bounds[3] + buffer_m
         )
 
-        # Get buildings in bbox
-        buildings = self.get_buildings_wfs(bbox)
+        # Get buildings in bbox using REST API (WFS is disabled)
+        buildings = self.get_buildings_rest(bbox)
 
         # Filter to buildings that intersect the parcel (with buffer)
         if buffer_m > 0:
@@ -489,22 +595,25 @@ def get_buildings_around_egrid(
 
 def get_buildings_in_bbox(
     bbox_2056: Tuple[float, float, float, float],
-    method: Literal["wfs", "stac"] = "wfs"
+    method: Literal["rest", "wfs", "stac"] = "rest"
 ) -> Tuple[List[BuildingFeature], Dict]:
     """
     Get buildings in bounding box
 
     Args:
         bbox_2056: Bounding box (min_x, min_y, max_x, max_y) in EPSG:2056
-        method: API method ('wfs' or 'stac')
+        method: API method ('rest' recommended, 'wfs' disabled, 'stac' returns tiles only)
 
     Returns:
         Tuple of (buildings list, statistics dict)
     """
     loader = SwissBuildingLoader()
 
-    if method == "wfs":
-        buildings = loader.get_buildings_wfs(bbox_2056)
+    if method == "rest":
+        buildings = loader.get_buildings_rest(bbox_2056)
+    elif method == "wfs":
+        logger.warning("WFS is disabled on Swiss geo.admin.ch - using REST API instead")
+        buildings = loader.get_buildings_rest(bbox_2056)
     elif method == "stac":
         tiles = loader.get_buildings_stac(bbox_2056)
         # TODO: Parse tiles

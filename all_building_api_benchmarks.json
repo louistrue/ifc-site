@@ -1,0 +1,90 @@
+[
+  {
+    "api_name": "GeoAdmin Identify (Point)",
+    "request_url": "https://api3.geo.admin.ch/rest/services/api/MapServer/identify?geometryType=esriGeometryPoint&geometry=2682750.0%2C1247750.0&layers=all%3Ach.swisstopo.swissbuildings3d_3_0-beta&mapExtent=2682500%2C1247500%2C2683000%2C1248000&imageDisplay=1000%2C1000%2C96&tolerance=50&returnGeometry=true&geometryFormat=geojson&sr=2056",
+    "response_time_ms": 101.10592842102051,
+    "status_code": 400,
+    "data_size_bytes": 105,
+    "num_buildings": 0,
+    "success": false,
+    "error_message": null,
+    "format": "GeoJSON"
+  },
+  {
+    "api_name": "STAC API",
+    "request_url": "https://data.geo.admin.ch/api/stac/v1/collections/ch.swisstopo.swissbuildings3d_3_0/items?bbox=8.18110671936759%2C46.426697808120736%2C8.185598275242544%2C46.431189363995685&limit=10",
+    "response_time_ms": 407.1500301361084,
+    "status_code": 200,
+    "data_size_bytes": 9826,
+    "num_buildings": 5,
+    "success": true,
+    "error_message": null,
+    "format": "STAC GeoJSON"
+  },
+  {
+    "api_name": "WFS Service",
+    "request_url": "https://wms.geo.admin.ch/?service=WFS&version=2.0.0&request=GetFeature&typeName=ch.swisstopo.swissbuildings3d_3_0&srsName=EPSG%3A2056&bbox=2682500%2C1247500%2C2683000%2C1248000%2CEPSG%3A2056&outputFormat=application%2Fjson&count=100",
+    "response_time_ms": 286.05008125305176,
+    "status_code": 400,
+    "data_size_bytes": 561,
+    "num_buildings": 0,
+    "success": false,
+    "error_message": "Status: 400",
+    "format": "GeoJSON/GML"
+  },
+  {
+    "api_name": "GeoAdmin Find",
+    "request_url": "https://api3.geo.admin.ch/rest/services/ech/MapServer/find?layer=ch.swisstopo.swissbuildings3d_3_0&searchText=%2A&searchField=id&returnGeometry=true&geometryFormat=geojson&sr=2056&limit=100&bbox=2682500%2C1247500%2C2683000%2C1248000",
+    "response_time_ms": 70.77980041503906,
+    "status_code": 400,
+    "data_size_bytes": 123,
+    "num_buildings": 0,
+    "success": false,
+    "error_message": "Status: 400",
+    "format": "GeoJSON"
+  },
+  {
+    "api_name": "GeoAdmin Identify (Point)",
+    "request_url": "https://api3.geo.admin.ch/rest/services/api/MapServer/identify?geometryType=esriGeometryPoint&geometry=2682500.0%2C1247500.0&layers=all%3Ach.swisstopo.swissbuildings3d_3_0-beta&mapExtent=2682000%2C1247000%2C2683000%2C1248000&imageDisplay=1000%2C1000%2C96&tolerance=50&returnGeometry=true&geometryFormat=geojson&sr=2056",
+    "response_time_ms": 78.36484909057617,
+    "status_code": 400,
+    "data_size_bytes": 105,
+    "num_buildings": 0,
+    "success": false,
+    "error_message": null,
+    "format": "GeoJSON"
+  },
+  {
+    "api_name": "STAC API",
+    "request_url": "https://data.geo.admin.ch/api/stac/v1/collections/ch.swisstopo.swissbuildings3d_3_0/items?bbox=8.176615163492635%2C46.42220625224578%2C8.185598275242544%2C46.431189363995685&limit=10",
+    "response_time_ms": 565.3238296508789,
+    "status_code": 200,
+    "data_size_bytes": 9826,
+    "num_buildings": 5,
+    "success": true,
+    "error_message": null,
+    "format": "STAC GeoJSON"
+  },
+  {
+    "api_name": "WFS Service",
+    "request_url": "https://wms.geo.admin.ch/?service=WFS&version=2.0.0&request=GetFeature&typeName=ch.swisstopo.swissbuildings3d_3_0&srsName=EPSG%3A2056&bbox=2682000%2C1247000%2C2683000%2C1248000%2CEPSG%3A2056&outputFormat=application%2Fjson&count=100",
+    "response_time_ms": 261.54303550720215,
+    "status_code": 400,
+    "data_size_bytes": 561,
+    "num_buildings": 0,
+    "success": false,
+    "error_message": "Status: 400",
+    "format": "GeoJSON/GML"
+  },
+  {
+    "api_name": "GeoAdmin Find",
+    "request_url": "https://api3.geo.admin.ch/rest/services/ech/MapServer/find?layer=ch.swisstopo.swissbuildings3d_3_0&searchText=%2A&searchField=id&returnGeometry=true&geometryFormat=geojson&sr=2056&limit=100&bbox=2682000%2C1247000%2C2683000%2C1248000",
+    "response_time_ms": 89.32185173034668,
+    "status_code": 400,
+    "data_size_bytes": 123,
+    "num_buildings": 0,
+    "success": false,
+    "error_message": "Status: 400",
+    "format": "GeoJSON"
+  }
+]
