@@ -21,6 +21,10 @@ import argparse
 import time
 import sys
 import math
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+logger = logging.getLogger(__name__)
 
 
 def fetch_boundary_by_egrid(egrid):
@@ -78,31 +82,87 @@ def fetch_boundary_by_egrid(egrid):
     return geometry, metadata
 
 
-def fetch_elevation_batch(coords, batch_size=50, delay=0.1):
+def _fetch_single_elevation(coord):
+    """
+    Fetch elevation for a single coordinate.
+    
+    Args:
+        coord: Tuple of (x, y) coordinates
+        
+    Returns:
+        Tuple of (index, elevation) or (index, None) on failure
+    """
+    x, y = coord
+    url = "https://api3.geo.admin.ch/rest/services/height"
+    try:
+        res = requests.get(url, params={"easting": x, "northing": y, "sr": "2056"}, timeout=10)
+        res.raise_for_status()
+        h = float(res.json()["height"])
+        return h
+    except Exception:
+        return None
+
+
+def fetch_elevation_batch(coords, batch_size=50, delay=0.1, max_workers=15):
     """
     Fetch elevations for a list of coordinates via geo.admin.ch REST height service.
-    """
-    url = "https://api3.geo.admin.ch/rest/services/height"
-    elevations = []
-    failed_count = 0
-    total = len(coords)
+    Uses concurrent requests for faster processing.
     
-    print(f"Fetching elevations for {total} points...")
-    
-    for i, (x, y) in enumerate(coords):
-        try:
-            res = requests.get(url, params={"easting": x, "northing": y, "sr": "2056"}, timeout=10)
-            res.raise_for_status()
-            h = float(res.json()["height"])
-            elevations.append(h)
-        except Exception:
-            elevations.append(elevations[-1] if elevations else 0.0)
-            failed_count += 1
+    Args:
+        coords: List of (x, y) coordinate tuples
+        batch_size: Progress reporting interval (deprecated, kept for compatibility)
+        delay: Delay between batches (deprecated, kept for compatibility)
+        max_workers: Number of concurrent workers (default: 15)
         
-        if (i + 1) % batch_size == 0:
-            pct = (i + 1) / total * 100
-            print(f"  Progress: {i + 1}/{total} ({pct:.1f}%)")
-            time.sleep(delay)
+    Returns:
+        List of elevations in same order as coords
+    """
+    total = len(coords)
+    elevations = [None] * total
+    failed_count = 0
+    
+    print(f"Fetching elevations for {total} points (concurrent, {max_workers} workers)...")
+    
+    # Use ThreadPoolExecutor for concurrent requests
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_index = {
+            executor.submit(_fetch_single_elevation, coord): i 
+            for i, coord in enumerate(coords)
+        }
+        
+        completed = 0
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            try:
+                elevation = future.result()
+                if elevation is not None:
+                    elevations[index] = elevation
+                else:
+                    failed_count += 1
+                    # Set to None for post-processing - don't access neighbors here due to race condition
+                    elevations[index] = None
+            except Exception:
+                failed_count += 1
+                # Set to None for post-processing - don't access neighbors here due to race condition
+                elevations[index] = None
+            
+            completed += 1
+            if completed % batch_size == 0:
+                pct = completed / total * 100
+                print(f"  Progress: {completed}/{total} ({pct:.1f}%)")
+    
+    # Post-processing: replace None values with nearest previous non-None value (or 0.0)
+    # This is race-free since all async operations have completed
+    for i in range(total):
+        if elevations[i] is None:
+            # Find nearest previous non-None value
+            fallback_value = 0.0
+            for j in range(i - 1, -1, -1):
+                if elevations[j] is not None:
+                    fallback_value = elevations[j]
+                    break
+            elevations[i] = fallback_value
     
     if failed_count > 0:
         print(f"  Warning: {failed_count} points failed to fetch elevation")
@@ -387,12 +447,17 @@ def calculate_height_offset(site_polygon, site_coords_3d, terrain_coords, terrai
 
 
 def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds, 
-                        center_x, center_y, egrid=None, cadastre_metadata=None):
+                        center_x, center_y, egrid=None, cadastre_metadata=None, return_model=False):
     """
     Create an IFC file with terrain (with hole) and/or site solid.
     terrain_triangles: List of triangles for terrain mesh, or None to skip terrain
     site_solid_data: Dict with site solid data, or None to skip site solid
     cadastre_metadata: dict with parcel info from cadastre API
+    return_model: If True, return model object instead of writing to file
+    
+    Returns:
+        If return_model=True: (model, offset_x, offset_y, offset_z)
+        If return_model=False: (offset_x, offset_y, offset_z)
     """
     model = ifcopenshell.file(schema='IFC4')
     
@@ -490,6 +555,34 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
     ifcopenshell.api.run("aggregate.assign_object", model,
                           products=[site], relating_object=project)
     ifcopenshell.api.run("geometry.edit_object_placement", model, product=site)
+    
+    # Add site footprint representation for visibility
+    if site_solid_data and site_solid_data.get('polygon_2d'):
+        try:
+            polygon_2d = site_solid_data['polygon_2d']
+            coords_2d = list(polygon_2d.exterior.coords)
+            if len(coords_2d) >= 3:
+                # Remove duplicate closing point
+                if coords_2d[0] == coords_2d[-1]:
+                    coords_2d = coords_2d[:-1]
+                
+                footprint_points = [
+                    model.createIfcCartesianPoint([
+                        float(x - offset_x),
+                        float(y - offset_y)
+                    ])
+                    for x, y in coords_2d
+                ]
+                # Close the polyline
+                footprint_points.append(footprint_points[0])
+                
+                polyline = model.createIfcPolyLine(footprint_points)
+                site_footprint_rep = model.createIfcShapeRepresentation(
+                    footprint_context, "FootPrint", "Curve2D", [polyline])
+                site.Representation = model.createIfcProductDefinitionShape(
+                    None, None, [site_footprint_rep])
+        except Exception as e:
+            logger.debug(f"Could not add site footprint: {e}")
     
     # Create terrain mesh (with hole) if requested
     if terrain_triangles:
@@ -738,17 +831,24 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
         if hasattr(entity, 'OwnerHistory') and entity.OwnerHistory is None:
             try:
                 entity.OwnerHistory = owner_history
-            except:
+            except Exception:
                 pass  # Some entities may not accept OwnerHistory
     
-    model.write(output_path)
-    print(f"\nIFC file created: {output_path}")
-    if terrain_triangles:
-        print(f"  Terrain triangles: {len(terrain_triangles)}")
-    if site_solid_data:
-        print(f"  Site solid: created")
-    
-    return offset_x, offset_y, offset_z
+    if return_model:
+        print(f"\nIFC model created in memory")
+        if terrain_triangles:
+            print(f"  Terrain triangles: {len(terrain_triangles)}")
+        if site_solid_data:
+            print(f"  Site solid: created")
+        return model, offset_x, offset_y, offset_z
+    else:
+        model.write(output_path)
+        print(f"\nIFC file created: {output_path}")
+        if terrain_triangles:
+            print(f"  Terrain triangles: {len(terrain_triangles)}")
+        if site_solid_data:
+            print(f"  Site solid: created")
+        return offset_x, offset_y, offset_z
 
 
 def run_combined_terrain_workflow(
@@ -757,11 +857,12 @@ def run_combined_terrain_workflow(
     center_y=None,
     radius=500.0,
     resolution=10.0,
-    densify=0.5,
+    densify=2.0,
     attach_to_solid=False,
     include_terrain=True,
     include_site_solid=True,
     output_path="combined_terrain.ifc",
+    return_model=False,
 ):
     """
     Run the combined terrain generation workflow using the existing processing pipeline.
@@ -893,19 +994,34 @@ def run_combined_terrain_workflow(
 
     # Generate combined IFC
     print("\nGenerating IFC file...")
-    create_combined_ifc(
-        terrain_triangles,
-        site_solid_data,
-        output_path,
-        circle_bounds,
-        center_x,
-        center_y,
-        egrid=egrid,
-        cadastre_metadata=cadastre_metadata,
-    )
-
-    print(f"\nSuccess! Combined terrain IFC saved to: {output_path}")
-    return output_path
+    if return_model:
+        model, offset_x, offset_y, offset_z = create_combined_ifc(
+            terrain_triangles,
+            site_solid_data,
+            output_path,
+            circle_bounds,
+            center_x,
+            center_y,
+            egrid=egrid,
+            cadastre_metadata=cadastre_metadata,
+            return_model=True,
+        )
+        print(f"\nSuccess! Combined terrain IFC model created in memory")
+        return model, site_geometry, cadastre_metadata, (offset_x, offset_y, offset_z)
+    else:
+        create_combined_ifc(
+            terrain_triangles,
+            site_solid_data,
+            output_path,
+            circle_bounds,
+            center_x,
+            center_y,
+            egrid=egrid,
+            cadastre_metadata=cadastre_metadata,
+            return_model=False,
+        )
+        print(f"\nSuccess! Combined terrain IFC saved to: {output_path}")
+        return output_path
 
 
 def main():
@@ -919,8 +1035,8 @@ def main():
                         help="Radius of circular terrain area (meters), default: 500")
     parser.add_argument("--resolution", type=float, default=10.0,
                         help="Grid resolution (meters), default: 10")
-    parser.add_argument("--densify", type=float, default=0.5,
-                        help="Site boundary densification interval (meters), default: 0.5")
+    parser.add_argument("--densify", type=float, default=2.0,
+                        help="Site boundary densification interval (meters), default: 2.0 (lower=faster, higher=more precise)")
     parser.add_argument("--attach-to-solid", action="store_true",
                         help="Attach terrain to smoothed site solid edges (less bumpy)")
     parser.add_argument("--output", default="combined_terrain.ifc",
