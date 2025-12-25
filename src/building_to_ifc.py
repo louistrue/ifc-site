@@ -10,7 +10,7 @@ from typing import List, Tuple, Optional
 
 import ifcopenshell
 import ifcopenshell.api
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, MultiPolygon
 from shapely.ops import orient, triangulate
 
 from src.building_loader import BuildingFeature
@@ -109,6 +109,348 @@ def create_building_footprint_surface(
     )
     
     return rep
+
+
+def create_building_3d_brep(
+    model: ifcopenshell.file,
+    building: BuildingFeature,
+    body_context,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
+    offset_z: float = 0.0,
+    base_elevation: float = 0.0
+) -> Optional[ifcopenshell.entity_instance]:
+    """
+    Create 3D BRep solid representation with actual roof geometry
+    
+    Uses 3D geometry from GDB if available in attributes, otherwise
+    creates simplified BRep from footprint + height.
+    
+    Args:
+        model: IFC model
+        building: BuildingFeature to convert (may have 3D geometry in attributes)
+        body_context: IFC Body context
+        offset_x, offset_y, offset_z: Project origin offsets
+        base_elevation: Base elevation for building
+        
+    Returns:
+        IfcShapeRepresentation for BRep solid or None if geometry invalid
+    """
+    if building.geometry is None or building.geometry.is_empty:
+        return None
+    
+    # Check if we have 3D geometry stored in attributes
+    geom_3d = building.attributes.get("geometry_3d") if building.attributes else None
+    
+    if geom_3d:
+        # Use actual 3D geometry from GDB
+        return _create_brep_from_3d_geometry(
+            model, geom_3d, body_context, offset_x, offset_y, offset_z, base_elevation,
+            building_footprint=building.geometry
+        )
+    else:
+        # Fallback: create BRep from footprint + height
+        return _create_brep_from_footprint(
+            model, building, body_context, offset_x, offset_y, offset_z, base_elevation
+        )
+
+
+def _create_brep_from_3d_geometry(
+    model: ifcopenshell.file,
+    geom_3d,
+    body_context,
+    offset_x: float,
+    offset_y: float,
+    offset_z: float,
+    base_elevation: float,
+    building_footprint: Optional[Polygon] = None
+) -> Optional[ifcopenshell.entity_instance]:
+    """
+    Create complete BRep building envelope from 3D geometry (MultiPolygonZ from GDB)
+    
+    Creates:
+    - Roof faces from 3D roof geometry
+    - Wall faces from roof outline down to base elevation
+    - Bottom face at base elevation
+    """
+    try:
+        from shapely.geometry import shape, Polygon as ShapelyPolygon
+        
+        # geom_3d should be a GeoJSON-like dict or Shapely geometry
+        if isinstance(geom_3d, dict):
+            geom = shape(geom_3d)
+        else:
+            geom = geom_3d
+        
+        faces = []
+        roof_outline_coords = []  # Store roof outline for wall creation
+        min_z = float('inf')
+        max_z = float('-inf')
+        
+        # Extract all 3D polygons (roof surfaces) and create roof faces
+        if hasattr(geom, "geoms"):
+            polygons = geom.geoms
+        else:
+            polygons = [geom]
+        
+        # First pass: create roof faces and collect outline
+        for poly in polygons:
+            if not hasattr(poly, "exterior"):
+                continue
+            
+            coords_3d = list(poly.exterior.coords)
+            if len(coords_3d) < 3:
+                continue
+            
+            # Check if we have Z coordinates
+            has_z = len(coords_3d[0]) > 2
+            
+            if has_z:
+                # Extract Z values for min/max
+                z_values = [z for x, y, z in coords_3d]
+                min_z = min(min_z, min(z_values))
+                max_z = max(max_z, max(z_values))
+                
+                # Create roof face with Z coordinates
+                points = [
+                    model.createIfcCartesianPoint([
+                        float(x - offset_x),
+                        float(y - offset_y),
+                        float(z - offset_z)
+                    ])
+                    for x, y, z in coords_3d[:-1]  # Remove duplicate closing point
+                ]
+                
+                # Store outline coordinates (use lowest Z for each XY point)
+                for x, y, z in coords_3d[:-1]:
+                    roof_outline_coords.append((x, y, z))
+            else:
+                # Use base elevation
+                z = float(base_elevation - offset_z)
+                points = [
+                    model.createIfcCartesianPoint([
+                        float(x - offset_x),
+                        float(y - offset_y),
+                        z
+                    ])
+                    for x, y in coords_3d[:-1]
+                ]
+            
+            if len(points) < 3:
+                continue
+            
+            loop = model.createIfcPolyLoop(points)
+            faces.append(model.createIfcFace([
+                model.createIfcFaceOuterBound(loop, True)
+            ]))
+        
+        if not faces:
+            return None
+        
+        # Use building footprint (full, ordered polygon) - this is the key!
+        if not building_footprint or building_footprint.is_empty:
+            logger.warning("No footprint available for building envelope")
+            return None
+        
+        # Get footprint coordinates (properly ordered polygon boundary)
+        footprint_coords = list(building_footprint.exterior.coords)
+        
+        # Remove duplicate closing point
+        if footprint_coords[0] == footprint_coords[-1]:
+            footprint_coords = footprint_coords[:-1]
+        
+        if len(footprint_coords) < 3:
+            return None
+        
+        # Calculate building base elevation
+        building_base_z = float(base_elevation - offset_z)
+        
+        # Calculate roof level - use minimum Z from roof geometry as wall top
+        # This ensures walls extend up to where the roof starts
+        if min_z != float('inf'):
+            roof_z = float(min_z - offset_z)
+        else:
+            # Fallback: use base + default height
+            roof_z = building_base_z + DEFAULT_BUILDING_HEIGHT
+        
+        # Create walls by extruding full footprint to roof level
+        # This ensures walls properly cover the entire footprint
+        for i in range(len(footprint_coords)):
+            p1 = footprint_coords[i]
+            p2 = footprint_coords[(i + 1) % len(footprint_coords)]
+            
+            # Create wall face: extrude footprint edge from base to roof
+            side_points = [
+                model.createIfcCartesianPoint([float(p1[0] - offset_x), float(p1[1] - offset_y), roof_z]),
+                model.createIfcCartesianPoint([float(p1[0] - offset_x), float(p1[1] - offset_y), building_base_z]),
+                model.createIfcCartesianPoint([float(p2[0] - offset_x), float(p2[1] - offset_y), building_base_z]),
+                model.createIfcCartesianPoint([float(p2[0] - offset_x), float(p2[1] - offset_y), roof_z])
+            ]
+            
+            side_loop = model.createIfcPolyLoop(side_points)
+            faces.append(model.createIfcFace([
+                model.createIfcFaceOuterBound(side_loop, True)
+            ]))
+        
+        # Create bottom face at building base elevation
+        # Triangulate to ensure proper representation even if polygon is simplified
+        polygon_2d = Polygon([(x - offset_x, y - offset_y) for x, y in footprint_coords])
+        if not polygon_2d.is_valid:
+            polygon_2d = polygon_2d.buffer(0)
+        if polygon_2d.is_empty:
+            logger.warning("Footprint polygon is empty, skipping bottom face")
+        else:
+            # Triangulate the footprint for proper bottom face representation
+            try:
+                for tri in triangulate(polygon_2d):
+                    # Filter out triangles that extend beyond the polygon boundary
+                    if not polygon_2d.contains(tri.centroid):
+                        continue
+                    
+                    oriented_tri = orient(tri, sign=1.0)
+                    tri_coords = list(oriented_tri.exterior.coords)[:-1]  # Remove duplicate closing point
+                    
+                    if len(tri_coords) < 3:
+                        continue
+                    
+                    tri_points = [
+                        model.createIfcCartesianPoint([
+                            float(x),
+                            float(y),
+                            building_base_z
+                        ])
+                        for x, y in tri_coords
+                    ]
+                    
+                    tri_loop = model.createIfcPolyLoop(tri_points)
+                    # Bottom face: ensure proper orientation (normal pointing downward)
+                    # Reverse the loop order for bottom face
+                    faces.append(model.createIfcFace([
+                        model.createIfcFaceOuterBound(tri_loop, True)
+                    ]))
+            except Exception as e:
+                logger.warning(f"Failed to triangulate bottom face: {e}, using simple polygon")
+                # Fallback: use simple polygon
+                bot_points = [
+                    model.createIfcCartesianPoint([
+                        float(x - offset_x),
+                        float(y - offset_y),
+                        building_base_z
+                    ])
+                    for x, y in reversed(footprint_coords)
+                ]
+                bot_loop = model.createIfcPolyLoop(bot_points)
+                faces.append(model.createIfcFace([
+                    model.createIfcFaceOuterBound(bot_loop, True)
+                ]))
+        
+        # Create closed shell
+        shell = model.createIfcClosedShell(faces)
+        solid = model.createIfcFacetedBrep(shell)
+        
+        rep = model.createIfcShapeRepresentation(
+            body_context,
+            "Body",
+            "Brep",
+            [solid]
+        )
+        
+        return rep
+    
+    except Exception as e:
+        logger.warning(f"Failed to create BRep from 3D geometry: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+        return None
+
+
+def _create_brep_from_footprint(
+    model: ifcopenshell.file,
+    building: BuildingFeature,
+    body_context,
+    offset_x: float,
+    offset_y: float,
+    offset_z: float,
+    base_elevation: float
+) -> Optional[ifcopenshell.entity_instance]:
+    """
+    Create simplified BRep from footprint + height (fallback when no 3D geometry)
+    """
+    height = building.height if building.height and building.height > 0 else DEFAULT_BUILDING_HEIGHT
+    
+    try:
+        coords = list(building.geometry.exterior.coords)
+        if coords[0] == coords[-1]:
+            coords = coords[:-1]
+        
+        if len(coords) < 3:
+            return None
+        
+        faces = []
+        base_z = float(base_elevation - offset_z)
+        top_z = float(base_elevation + height - offset_z)
+        
+        # Create top face (roof)
+        top_points = [
+            model.createIfcCartesianPoint([
+                float(x - offset_x),
+                float(y - offset_y),
+                top_z
+            ])
+            for x, y in coords
+        ]
+        top_loop = model.createIfcPolyLoop(top_points)
+        faces.append(model.createIfcFace([
+            model.createIfcFaceOuterBound(top_loop, True)
+        ]))
+        
+        # Create side faces (walls)
+        for i in range(len(coords)):
+            p1 = coords[i]
+            p2 = coords[(i + 1) % len(coords)]
+            
+            side_points = [
+                model.createIfcCartesianPoint([float(p1[0] - offset_x), float(p1[1] - offset_y), top_z]),
+                model.createIfcCartesianPoint([float(p1[0] - offset_x), float(p1[1] - offset_y), base_z]),
+                model.createIfcCartesianPoint([float(p2[0] - offset_x), float(p2[1] - offset_y), base_z]),
+                model.createIfcCartesianPoint([float(p2[0] - offset_x), float(p2[1] - offset_y), top_z])
+            ]
+            
+            side_loop = model.createIfcPolyLoop(side_points)
+            faces.append(model.createIfcFace([
+                model.createIfcFaceOuterBound(side_loop, True)
+            ]))
+        
+        # Create bottom face
+        bot_points = [
+            model.createIfcCartesianPoint([
+                float(x - offset_x),
+                float(y - offset_y),
+                base_z
+            ])
+            for x, y in reversed(coords)
+        ]
+        bot_loop = model.createIfcPolyLoop(bot_points)
+        faces.append(model.createIfcFace([
+            model.createIfcFaceOuterBound(bot_loop, True)
+        ]))
+        
+        # Create closed shell
+        shell = model.createIfcClosedShell(faces)
+        solid = model.createIfcFacetedBrep(shell)
+        
+        rep = model.createIfcShapeRepresentation(
+            body_context,
+            "Body",
+            "Brep",
+            [solid]
+        )
+        
+        return rep
+    
+    except Exception as e:
+        logger.warning(f"Failed to create BRep from footprint: {e}")
+        return None
 
 
 def create_building_extrusion(
@@ -391,11 +733,23 @@ def building_to_ifc(
     # Create representations
     representations = []
 
-    # 1. Create 3D extruded body (always - ensures visibility)
-    body_rep = create_building_extrusion(
-        model, building, body_context,
-        offset_x, offset_y, offset_z, base_elevation, height_used
-    )
+    # 1. Create 3D body representation
+    # Check if we have 3D geometry from GDB
+    has_3d_geometry = building.attributes and building.attributes.get("geometry_3d")
+    
+    if has_3d_geometry:
+        # Use real 3D BRep geometry
+        body_rep = create_building_3d_brep(
+            model, building, body_context,
+            offset_x, offset_y, offset_z, base_elevation
+        )
+    else:
+        # Use simple extrusion
+        body_rep = create_building_extrusion(
+            model, building, body_context,
+            offset_x, offset_y, offset_z, base_elevation, height_used
+        )
+    
     if body_rep:
         representations.append(body_rep)
     else:

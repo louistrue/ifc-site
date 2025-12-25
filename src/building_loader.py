@@ -7,13 +7,25 @@ Integrates with existing terrain workflow.
 
 import logging
 import time
+import tempfile
+import zipfile
+import os
+from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Literal
 from dataclasses import dataclass
 from functools import wraps
 
 import requests
-from shapely.geometry import shape, box, Polygon, MultiPolygon
+from shapely.geometry import shape, box, Polygon, MultiPolygon, Point
 from shapely.ops import unary_union
+
+try:
+    import fiona
+    from fiona import drivers
+    FIONA_AVAILABLE = True
+except ImportError:
+    FIONA_AVAILABLE = False
+    logging.warning("fiona not available - 3D building download disabled")
 
 try:
     from pyproj import Transformer
@@ -317,6 +329,309 @@ class SwissBuildingLoader:
         except Exception as e:
             logger.error(f"REST API request failed: {e}")
             raise
+
+    def get_buildings_3d(
+        self,
+        bbox_2056: Tuple[float, float, float, float],
+        timeout: int = 60,
+        max_tiles: int = 1
+    ) -> List[BuildingFeature]:
+        """
+        Get buildings with real 3D geometry from Swiss GDB tiles
+        
+        Downloads ~14MB GDB file, parses with Fiona, extracts buildings.
+        Expected time: 10-30 seconds depending on network.
+        
+        Args:
+            bbox_2056: Bounding box (min_x, min_y, max_x, max_y) in EPSG:2056
+            timeout: Download timeout in seconds
+            max_tiles: Maximum number of tiles to process (default: 1 to save disk space)
+            
+        Returns:
+            List of BuildingFeature objects with 3D geometry and heights
+        """
+        if not FIONA_AVAILABLE:
+            raise ImportError("fiona is required for 3D building download. Install with: pip install fiona")
+        
+        logger.info(f"Fetching 3D buildings via STAC GDB in bbox: {bbox_2056}")
+        
+        # Step 1: Query STAC for tiles covering bbox
+        bbox_wgs84 = self.bbox_2056_to_wgs84(bbox_2056)
+        tiles = self.get_buildings_stac(bbox_2056, limit=max_tiles)
+        
+        if not tiles:
+            logger.warning("No STAC tiles found for bbox")
+            return []
+        
+        logger.info(f"Found {len(tiles)} tiles, processing up to {max_tiles} tiles...")
+        
+        all_buildings = []
+        
+        # Step 2: Download and parse each tile
+        for tile_idx, tile in enumerate(tiles):
+            try:
+                # Find GDB asset
+                gdb_asset = None
+                for asset_name, asset_info in tile.get("assets", {}).items():
+                    if "gdb.zip" in asset_name.lower():
+                        gdb_asset = asset_info
+                        break
+                
+                if not gdb_asset:
+                    logger.warning(f"No GDB asset found in tile {tile.get('id')}")
+                    continue
+                
+                gdb_url = gdb_asset.get("href")
+                if not gdb_url:
+                    continue
+                
+                logger.info(f"Processing tile {tile_idx + 1}/{len(tiles)}: {tile.get('id')}")
+                logger.info(f"Downloading GDB from {gdb_url[:80]}...")
+                download_start = time.time()
+                
+                # Extract to temp directory (auto-cleans up on exit)
+                with tempfile.TemporaryDirectory(prefix="gdb_tile_") as temp_dir:
+                    zip_path = os.path.join(temp_dir, "tile.gdb.zip")
+                    
+                    # Download with streaming to avoid memory issues
+                    response = requests.get(gdb_url, timeout=timeout, stream=True)
+                    response.raise_for_status()
+                    
+                    # Get content length for progress
+                    total_size = int(response.headers.get('content-length', 0))
+                    
+                    # Write downloaded content to file
+                    downloaded_size = 0
+                    with open(zip_path, "wb") as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            if chunk:  # filter out keep-alive chunks
+                                f.write(chunk)
+                                downloaded_size += len(chunk)
+                    
+                    download_time = time.time() - download_start
+                    size_mb = downloaded_size / 1024 / 1024
+                    logger.info(f"Downloaded {size_mb:.1f} MB in {download_time:.1f}s")
+                    
+                    # Extract zip
+                    extract_start = time.time()
+                    extract_dir = os.path.join(temp_dir, "gdb")
+                    os.makedirs(extract_dir, exist_ok=True)
+                    
+                    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                        zip_ref.extractall(extract_dir)
+                    
+                    extract_time = time.time() - extract_start
+                    logger.info(f"Extracted in {extract_time:.1f}s")
+                    
+                    # Find GDB directory
+                    gdb_dirs = [d for d in os.listdir(extract_dir) if d.endswith(".gdb")]
+                    if not gdb_dirs:
+                        logger.warning(f"No .gdb directory found in extracted files")
+                        continue
+                    
+                    gdb_path = os.path.join(extract_dir, gdb_dirs[0])
+                    
+                    # Parse with Fiona
+                    parse_start = time.time()
+                    buildings = self._parse_gdb_tile(gdb_path, bbox_2056)
+                    parse_time = time.time() - parse_start
+                    
+                    logger.info(f"Parsed {len(buildings)} buildings from tile in {parse_time:.1f}s")
+                    all_buildings.extend(buildings)
+                    
+                    # Temp directory automatically cleaned up here when exiting 'with' block
+                    logger.debug(f"Cleaned up temp files for tile {tile.get('id')}")
+            
+            except Exception as e:
+                logger.error(f"Failed to process tile {tile.get('id')}: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+                continue
+        
+        logger.info(f"Retrieved {len(all_buildings)} 3D buildings total")
+        return all_buildings
+
+    def _parse_gdb_tile(
+        self,
+        gdb_path: str,
+        bbox_2056: Tuple[float, float, float, float]
+    ) -> List[BuildingFeature]:
+        """
+        Parse a GDB tile file and extract buildings within bbox
+        
+        Args:
+            gdb_path: Path to extracted .gdb directory
+            bbox_2056: Bounding box to filter buildings
+            
+        Returns:
+            List of BuildingFeature objects with 3D geometry
+        """
+        buildings = []
+        
+        try:
+            # Open GDB with Fiona
+            # GDB typically has layers like "Buildings", "Roof", "Wall", etc.
+            layers = fiona.listlayers(gdb_path)
+            logger.debug(f"GDB layers: {layers}")
+            
+            # Try common layer names
+            building_layer = None
+            for layer_name in ["Buildings", "Building", "Gebaeude", "buildings"]:
+                if layer_name in layers:
+                    building_layer = layer_name
+                    break
+            
+            if not building_layer and layers:
+                # Use first layer if no match
+                building_layer = layers[0]
+            
+            if not building_layer:
+                logger.warning(f"No suitable layer found in GDB")
+                return []
+            
+            logger.info(f"Reading layer: {building_layer}")
+            
+            # Create bbox polygon for filtering
+            bbox_poly = box(bbox_2056[0], bbox_2056[1], bbox_2056[2], bbox_2056[3])
+            
+            # Read features
+            with fiona.open(gdb_path, layer=building_layer) as src:
+                logger.info(f"CRS: {src.crs}")
+                
+                for feature in src:
+                    try:
+                        # Get geometry
+                        geom = shape(feature["geometry"])
+                        
+                        # Filter to bbox
+                        if not bbox_poly.intersects(geom):
+                            continue
+                        
+                        # Extract 3D geometry
+                        # GDB has MultiPolygonZ or PolygonZ with Z coordinates
+                        building = self._extract_building_from_3d_geom(
+                            feature, geom, bbox_2056
+                        )
+                        
+                        if building:
+                            buildings.append(building)
+                    
+                    except Exception as e:
+                        logger.warning(f"Failed to parse feature: {e}")
+                        continue
+        
+        except Exception as e:
+            logger.error(f"Failed to parse GDB: {e}")
+            raise
+        
+        return buildings
+
+    def _extract_building_from_3d_geom(
+        self,
+        feature: Dict,
+        geom,
+        bbox_2056: Tuple[float, float, float, float]
+    ) -> Optional[BuildingFeature]:
+        """
+        Extract building information from 3D geometry
+        
+        Args:
+            feature: Fiona feature dict
+            geom: Shapely geometry (may have Z coordinates)
+            bbox_2056: Bounding box
+            
+        Returns:
+            BuildingFeature or None
+        """
+        try:
+            # Get feature ID
+            feature_id = str(feature.get("id", feature.get("properties", {}).get("id", "unknown")))
+            
+            # Extract Z coordinates to calculate height
+            z_values = []
+            
+            if hasattr(geom, "geoms"):
+                # MultiPolygon - get all Z values
+                for poly in geom.geoms:
+                    if hasattr(poly, "exterior"):
+                        coords = list(poly.exterior.coords)
+                        z_values.extend([z for x, y, z in coords if len(coords[0]) > 2])
+            elif hasattr(geom, "exterior"):
+                # Polygon - get Z values from exterior
+                coords = list(geom.exterior.coords)
+                if len(coords) > 0 and len(coords[0]) > 2:
+                    z_values = [z for x, y, z in coords]
+            
+            # Calculate height
+            height = None
+            if z_values:
+                height = max(z_values) - min(z_values)
+            
+            # Extract 2D footprint (project to XY plane)
+            if hasattr(geom, "geoms"):
+                # MultiPolygon - take largest polygon
+                footprint_2d = max(geom.geoms, key=lambda p: p.area if hasattr(p, "area") else 0)
+            else:
+                footprint_2d = geom
+            
+            # Convert to 2D polygon
+            if hasattr(footprint_2d, "exterior"):
+                coords_2d = [(x, y) for x, y, *_ in footprint_2d.exterior.coords]
+                footprint = Polygon(coords_2d)
+            else:
+                # Already 2D
+                footprint = footprint_2d
+            
+            # Validate footprint
+            if footprint.is_empty or not footprint.is_valid:
+                footprint = footprint.buffer(0)
+            if footprint.is_empty:
+                return None
+            
+            # Get properties
+            props = feature.get("properties", {})
+            
+            # Store 3D geometry in attributes for later use in IFC conversion
+            # Convert geometry to GeoJSON-like dict for storage
+            geom_dict = None
+            try:
+                # Try to get __geo_interface__ which Shapely geometries provide
+                if hasattr(geom, "__geo_interface__"):
+                    geom_dict = geom.__geo_interface__
+                elif hasattr(geom, "geoms"):
+                    # MultiPolygon - manually construct GeoJSON
+                    coords_list = []
+                    for poly in geom.geoms:
+                        if hasattr(poly, "exterior"):
+                            poly_coords = list(poly.exterior.coords)
+                            if poly_coords:
+                                # Check if 3D
+                                if len(poly_coords[0]) > 2:
+                                    ring_coords = [[float(x), float(y), float(z)] for x, y, z in poly_coords]
+                                else:
+                                    ring_coords = [[float(x), float(y)] for x, y in poly_coords]
+                                coords_list.append([ring_coords])
+                    if coords_list:
+                        geom_dict = {"type": "MultiPolygon", "coordinates": coords_list}
+            except Exception as e:
+                logger.debug(f"Could not serialize 3D geometry: {e}")
+            
+            if geom_dict:
+                props["geometry_3d"] = geom_dict
+            
+            return BuildingFeature(
+                id=feature_id,
+                geometry=footprint,
+                height=height,
+                building_class=props.get("building_class") or props.get("type"),
+                roof_type=props.get("roof_type") or props.get("dachform"),
+                year_built=props.get("year_built") or props.get("baujahr"),
+                attributes=props
+            )
+        
+        except Exception as e:
+            logger.warning(f"Failed to extract building from 3D geometry: {e}")
+            return None
 
     def _parse_rest_result(self, result: Dict) -> Optional[BuildingFeature]:
         """
