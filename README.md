@@ -4,7 +4,8 @@ Convert Swiss cadastral parcels into comprehensive 3D IFC (Industry Foundation C
 
 ## Features
 
-- **Cadastral boundaries** - Fetch Swiss parcels via EGRID from geo.admin.ch
+- **Address-based lookup** - Simply provide a Swiss address, automatic EGRID resolution
+- **Cadastral boundaries** - Fetch Swiss parcels via EGRID or address from geo.admin.ch
 - **3D terrain generation** - Circular terrain mesh with precise site cutout
 - **Building footprints & 3D models** - Load buildings from Swiss APIs (CityGML, Vector 25k)
 - **Complete BIM models** - Site + terrain + buildings in a single georeferenced IFC file
@@ -30,7 +31,17 @@ pip install -r requirements.txt
 
 ### Generate a Complete Site Model
 
-Create terrain, site boundary, and buildings in one command:
+Create terrain, site boundary, and buildings in one command using just an address:
+
+```bash
+python -m src.terrain_with_buildings \
+  --address "Bundesplatz 3, 3003 Bern" \
+  --radius 500 \
+  --include-buildings \
+  --output complete_site.ifc
+```
+
+Or use EGRID directly:
 
 ```bash
 python -m src.terrain_with_buildings \
@@ -53,6 +64,18 @@ This generates a georeferenced IFC file with:
 
 Generates the most comprehensive output: terrain mesh, site solid, and 3D buildings.
 
+**Using address (recommended for best UX):**
+```bash
+python -m src.terrain_with_buildings \
+  --address "Bahnhofstrasse 1, 8001 Zürich" \
+  --radius 500 \
+  --resolution 10 \
+  --include-buildings \
+  --building-buffer 10 \
+  --output complete.ifc
+```
+
+**Using EGRID:**
 ```bash
 python -m src.terrain_with_buildings \
   --egrid CH999979659148 \
@@ -64,7 +87,8 @@ python -m src.terrain_with_buildings \
 ```
 
 **Key Options:**
-- `--egrid` - Swiss EGRID identifier (required)
+- `--address` - Swiss address (e.g., "Bundesplatz 3, 3003 Bern")
+- `--egrid` - Swiss EGRID identifier (alternative to address)
 - `--radius` - Terrain radius in meters (default: 500)
 - `--resolution` - Grid resolution in meters (default: 10, lower = more detail)
 - `--include-buildings` - Include 3D buildings from CityGML
@@ -78,6 +102,16 @@ python -m src.terrain_with_buildings \
 
 Creates terrain mesh with site boundary solid, without buildings.
 
+**Using address:**
+```bash
+python -m src.terrain_with_site \
+  --address "Bundesplatz 3, 3003 Bern" \
+  --radius 500 \
+  --resolution 10 \
+  --output terrain_site.ifc
+```
+
+**Using EGRID:**
 ```bash
 python -m src.terrain_with_site \
   --egrid CH999979659148 \
@@ -87,7 +121,8 @@ python -m src.terrain_with_site \
 ```
 
 **Key Options:**
-- `--egrid` - Swiss EGRID identifier (required)
+- `--address` - Swiss address (e.g., "Bundesplatz 3, 3003 Bern")
+- `--egrid` - Swiss EGRID identifier (alternative to address)
 - `--center-x`, `--center-y` - Override terrain center (EPSG:2056)
 - `--radius` - Terrain radius in meters (default: 500)
 - `--resolution` - Grid resolution (default: 10m)
@@ -198,7 +233,19 @@ uvicorn src.rest_api:app --host 0.0.0.0 --port 8000
 
 ### Example Requests
 
-**Immediate generation:**
+**Immediate generation (using address):**
+```bash
+curl -X POST http://localhost:8000/generate \
+  -H "Content-Type: application/json" \
+  -o site.ifc \
+  -d '{
+    "address": "Bundesplatz 3, 3003 Bern",
+    "radius": 500,
+    "resolution": 10
+  }'
+```
+
+**Immediate generation (using EGRID):**
 ```bash
 curl -X POST http://localhost:8000/generate \
   -H "Content-Type: application/json" \
@@ -206,20 +253,18 @@ curl -X POST http://localhost:8000/generate \
   -d '{
     "egrid": "CH999979659148",
     "radius": 500,
-    "resolution": 10,
-    "include_buildings": true
+    "resolution": 10
   }'
 ```
 
 **Background job:**
 ```bash
-# Start job
+# Start job (using address)
 JOB_ID=$(curl -s -X POST http://localhost:8000/jobs \
   -H "Content-Type: application/json" \
   -d '{
-    "egrid": "CH999979659148",
-    "radius": 500,
-    "include_buildings": true
+    "address": "Bahnhofstrasse 1, 8001 Zürich",
+    "radius": 500
   }' | jq -r .job_id)
 
 # Check status
@@ -233,29 +278,34 @@ curl -o site.ifc http://localhost:8000/jobs/$JOB_ID/download
 
 ### Workflow Overview
 
-1. **Boundary Fetching**
+1. **Address Resolution** (when using address)
+   - Geocodes Swiss address to EPSG:2056 coordinates via geo.admin.ch
+   - Looks up cadastral parcel at coordinates
+   - Resolves to EGRID automatically
+
+2. **Boundary Fetching**
    - Fetches cadastral polygon via geo.admin.ch API using EGRID
    - Extracts metadata (parcel number, canton, area, perimeter)
    - Calculates site centroid
 
-2. **Terrain Generation**
+3. **Terrain Generation**
    - Creates circular grid around site centroid
    - Fetches elevation data from Swiss height API
    - Generates Delaunay triangulation
    - Creates precise cutout for site boundary
 
-3. **Site Solid Creation**
+4. **Site Solid Creation**
    - Samples elevations along site boundary
    - Applies smoothing algorithm (best-fit plane + circular mean filter)
    - Creates closed solid with triangulated surfaces
 
-4. **Building Integration** (if enabled)
+5. **Building Integration** (if enabled)
    - Queries building APIs within site bounds or terrain radius
    - Downloads CityGML tiles with complete 3D geometry
    - Filters buildings to search area
    - Converts to IFC building elements
 
-5. **IFC Generation**
+6. **IFC Generation**
    - Creates georeferenced IFC4 file (EPSG:2056)
    - Adds terrain mesh as IfcGeographicElement
    - Adds site solid with property sets

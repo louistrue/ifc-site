@@ -18,6 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import terrain_with_site
+from .address_lookup import AddressResolver
 
 # Rate limiter setup
 limiter = Limiter(key_func=get_remote_address)
@@ -78,13 +79,20 @@ if ALLOWED_HOSTS != ["*"]:
 
 
 class GenerateRequest(BaseModel):
-    egrid: str = Field(
-        ...,
+    egrid: Optional[str] = Field(
+        None,
         min_length=10,
         max_length=20,
         pattern=r"^CH[0-9]{9,18}$",  # Swiss EGRID format validation
-        description="Swiss cadastral EGRID identifier (required)",
+        description="Swiss cadastral EGRID identifier (provide either egrid or address)",
         example="CH999979659148"
+    )
+    address: Optional[str] = Field(
+        None,
+        min_length=5,
+        max_length=200,
+        description="Swiss address (provide either egrid or address). Examples: 'Bundesplatz 3, 3003 Bern' or 'Bahnhofstrasse 1, 8001 Zürich'",
+        example="Bundesplatz 3, 3003 Bern"
     )
     center_x: Optional[float] = Field(
         None,
@@ -144,18 +152,38 @@ class GenerateRequest(BaseModel):
             raise ValueError("At least one of include_terrain or include_site_solid must be True")
         return self
 
+    @model_validator(mode='after')
+    def validate_egrid_or_address(self):
+        if not self.egrid and not self.address:
+            raise ValueError("Either 'egrid' or 'address' must be provided")
+        if self.egrid and self.address:
+            raise ValueError("Provide either 'egrid' or 'address', not both")
+        return self
+
     model_config = ConfigDict(
         json_schema_extra={
-            "example": {
-                "egrid": "CH999979659148",
-                "radius": 500.0,
-                "resolution": 10.0,
-                "densify": 0.5,
-                "attach_to_solid": False,
-                "include_terrain": True,
-                "include_site_solid": True,
-                "output_name": "combined_terrain.ifc"
-            }
+            "examples": [
+                {
+                    "address": "Bundesplatz 3, 3003 Bern",
+                    "radius": 500.0,
+                    "resolution": 10.0,
+                    "densify": 0.5,
+                    "attach_to_solid": False,
+                    "include_terrain": True,
+                    "include_site_solid": True,
+                    "output_name": "combined_terrain.ifc"
+                },
+                {
+                    "egrid": "CH999979659148",
+                    "radius": 500.0,
+                    "resolution": 10.0,
+                    "densify": 0.5,
+                    "attach_to_solid": False,
+                    "include_terrain": True,
+                    "include_site_solid": True,
+                    "output_name": "combined_terrain.ifc"
+                }
+            ]
         }
     )
 
@@ -285,9 +313,20 @@ async def _cleanup_old_jobs():
 
 
 async def _run_generation(request: GenerateRequest, output_path: str):
+    # Resolve address to EGRID if address was provided
+    egrid = request.egrid
+    if request.address:
+        print(f"Resolving address: {request.address}")
+        resolver = AddressResolver()
+        result = await run_in_threadpool(resolver.resolve, request.address)
+        if result is None:
+            raise ValueError(f"Could not resolve address to cadastral parcel: {request.address}")
+        egrid, metadata = result
+        print(f"Resolved to EGRID: {egrid} (Canton: {metadata.get('canton', 'N/A')})")
+
     return await run_in_threadpool(
         terrain_with_site.run_combined_terrain_workflow,
-        request.egrid,
+        egrid,
         request.center_x,
         request.center_y,
         request.radius,

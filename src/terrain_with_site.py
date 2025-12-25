@@ -7,6 +7,7 @@ This script creates a single IFC file containing:
 - Site solid with smoothed surface, height-adjusted to align with terrain edges
 
 Usage:
+    python -m src.terrain_with_site --address "Bundesplatz 3, 3003 Bern" --radius 500 --output combined.ifc
     python -m src.terrain_with_site --egrid CH999979659148 --radius 500 --resolution 20 --output combined.ifc
 """
 
@@ -23,6 +24,7 @@ import sys
 import math
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -852,23 +854,53 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
 
 
 def run_combined_terrain_workflow(
-    egrid=None,
-    center_x=None,
-    center_y=None,
-    radius=500.0,
-    resolution=10.0,
-    densify=2.0,
-    attach_to_solid=False,
-    include_terrain=True,
-    include_site_solid=True,
-    output_path="combined_terrain.ifc",
-    return_model=False,
+    egrid: Optional[str] = None,
+    address: Optional[str] = None,
+    center_x: Optional[float] = None,
+    center_y: Optional[float] = None,
+    radius: float = 500.0,
+    resolution: float = 10.0,
+    densify: float = 2.0,
+    attach_to_solid: bool = False,
+    include_terrain: bool = True,
+    include_site_solid: bool = True,
+    output_path: str = "combined_terrain.ifc",
+    return_model: bool = False,
 ):
     """
     Run the combined terrain generation workflow using the existing processing pipeline.
+
+    Args:
+        egrid: Swiss EGRID identifier (provide either egrid or address)
+        address: Swiss address string (provide either egrid or address)
+        center_x: Optional center easting override
+        center_y: Optional center northing override
+        radius: Radius of terrain area in meters
+        resolution: Grid resolution in meters
+        densify: Site boundary densification interval
+        attach_to_solid: Attach terrain to smoothed site edges
+        include_terrain: Include terrain mesh
+        include_site_solid: Include site solid
+        output_path: Output IFC file path
+        return_model: Return model object instead of writing file
+
+    Returns:
+        If return_model=True: (model, site_geometry, metadata, offsets)
+        If return_model=False: output_path
     """
+    # Resolve address to EGRID if provided
+    if address and not egrid:
+        from .address_lookup import AddressResolver
+        print(f"Resolving address: {address}")
+        resolver = AddressResolver()
+        result = resolver.resolve(address)
+        if result is None:
+            raise ValueError(f"Could not resolve address to cadastral parcel: {address}")
+        egrid, _metadata = result
+        print(f"Resolved to EGRID: {egrid}")
+
     if not egrid:
-        raise ValueError("EGRID is required for combined terrain generation.")
+        raise ValueError("Either EGRID or address is required for combined terrain generation.")
 
     # Fetch site boundary from cadastre (required for combined workflow)
     cadastre_metadata = None
@@ -1026,9 +1058,19 @@ def run_combined_terrain_workflow(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Create combined terrain with site cutout"
+        description="Create combined terrain with site cutout",
+        epilog="Examples:\n"
+               "  python -m src.terrain_with_site --address 'Bundesplatz 3, 3003 Bern' --radius 500\n"
+               "  python -m src.terrain_with_site --egrid CH999979659148 --radius 500 --resolution 20\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--egrid", help="EGRID number")
+
+    # Input group - either EGRID or address
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--egrid", help="Swiss EGRID identifier (e.g., CH999979659148)")
+    input_group.add_argument("--address", help="Swiss address (e.g., 'Bundesplatz 3, 3003 Bern')")
+
+    # Other arguments
     parser.add_argument("--center-x", type=float, help="Center easting (EPSG:2056)")
     parser.add_argument("--center-y", type=float, help="Center northing (EPSG:2056)")
     parser.add_argument("--radius", type=float, default=500.0,
@@ -1041,12 +1083,13 @@ def main():
                         help="Attach terrain to smoothed site solid edges (less bumpy)")
     parser.add_argument("--output", default="combined_terrain.ifc",
                         help="Output IFC file path")
-    
+
     args = parser.parse_args()
-    
+
     try:
         run_combined_terrain_workflow(
             egrid=args.egrid,
+            address=args.address,
             center_x=args.center_x,
             center_y=args.center_y,
             radius=args.radius,
