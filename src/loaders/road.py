@@ -266,7 +266,9 @@ class SwissRoadLoader:
                     return None
             elif geom.geom_type == "Polygon":
                 # Convert polygon to centerline (simplified approach)
-                geom = geom.exterior
+                # exterior returns LinearRing, convert to LineString
+                coords = list(geom.exterior.coords)
+                geom = LineString(coords)
 
             # Extract to 2D if 3D
             if hasattr(geom, 'has_z') and geom.has_z:
