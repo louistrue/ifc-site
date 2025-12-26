@@ -7,9 +7,10 @@ Integrates with existing terrain workflow for complete site context.
 
 import logging
 import time
-from typing import Optional, Tuple, List, Dict, Literal
+from typing import Optional, Tuple, List, Dict, Literal, ClassVar
 from dataclasses import dataclass
 from functools import wraps
+from threading import Lock
 
 import requests
 from shapely.geometry import shape, box, LineString, MultiLineString, Polygon
@@ -41,24 +42,26 @@ class RoadFeature:
 
 def rate_limit(max_per_second: float):
     """
-    Rate limiting decorator to prevent API abuse
+    Thread-safe rate limiting decorator to prevent API abuse
 
     Args:
         max_per_second: Maximum requests per second
     """
     min_interval = 1.0 / max_per_second
     last_called = [0.0]
+    lock = Lock()
 
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            elapsed = time.time() - last_called[0]
-            left_to_wait = min_interval - elapsed
-            if left_to_wait > 0:
-                time.sleep(left_to_wait)
+            with lock:
+                elapsed = time.time() - last_called[0]
+                left_to_wait = min_interval - elapsed
+                if left_to_wait > 0:
+                    time.sleep(left_to_wait)
+                last_called[0] = time.time()
 
             result = func(*args, **kwargs)
-            last_called[0] = time.time()
             return result
 
         return wrapper
@@ -84,7 +87,7 @@ class SwissRoadLoader:
     ROADS_MAIN = "ch.astra.hauptstrassennetz"  # Main roads network (ASTRA)
 
     # Road classification types
-    ROAD_CLASSES = {
+    ROAD_CLASSES: ClassVar[Dict[str, str]] = {
         "Autobahn": "Highway/Motorway",
         "Autostrasse": "Expressway",
         "Hauptstrasse": "Main road",
@@ -187,7 +190,7 @@ class SwissRoadLoader:
     def get_roads_rest(
         self,
         bbox_2056: Tuple[float, float, float, float],
-        layer: str = None,
+        layer: Optional[str] = None,
         max_features: int = 1000
     ) -> List[RoadFeature]:
         """
@@ -235,7 +238,7 @@ class SwissRoadLoader:
             return roads
 
         except Exception as e:
-            logger.error(f"REST API request failed: {e}")
+            logger.exception(f"REST API request failed: {e}")
             raise
 
     def _parse_rest_result(self, result: Dict) -> Optional[RoadFeature]:
@@ -306,7 +309,7 @@ class SwissRoadLoader:
         x: float,
         y: float,
         radius: float = 500,
-        layer: str = None
+        layer: Optional[str] = None
     ) -> List[RoadFeature]:
         """
         Get roads within radius of a point
@@ -355,15 +358,15 @@ class SwissRoadLoader:
 
         # Import here to avoid circular dependency
         try:
-            try:
-                from src.loaders.cadastre import fetch_boundary_by_egrid
-            except (ImportError, ModuleNotFoundError):
-                from loaders.cadastre import fetch_boundary_by_egrid
+            from src.loaders.cadastre import fetch_boundary_by_egrid
         except (ImportError, ModuleNotFoundError):
-            from terrain_with_site import fetch_boundary_by_egrid
+            try:
+                from loaders.cadastre import fetch_boundary_by_egrid
+            except (ImportError, ModuleNotFoundError):
+                from terrain_with_site import fetch_boundary_by_egrid
 
-        # Get parcel boundary
-        site_boundary, metadata = fetch_boundary_by_egrid(egrid)
+        # Get parcel boundary (metadata not used here)
+        site_boundary, _ = fetch_boundary_by_egrid(egrid)
         if site_boundary is None:
             logger.warning(f"No boundary found for EGRID {egrid}")
             return []
@@ -460,7 +463,7 @@ def get_roads_around_egrid(
 
 def get_roads_in_bbox(
     bbox_2056: Tuple[float, float, float, float],
-    layer: str = None
+    layer: Optional[str] = None
 ) -> Tuple[List[RoadFeature], Dict]:
     """
     Get roads in bounding box

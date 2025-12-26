@@ -204,7 +204,7 @@ The tool supports Swiss road and transportation network data:
 Load roads programmatically:
 
 ```python
-from src.road_loader import SwissRoadLoader, get_roads_around_egrid
+from src.loaders.road import SwissRoadLoader, get_roads_around_egrid
 
 # Method 1: Load roads by EGRID
 roads, stats = get_roads_around_egrid(
@@ -217,7 +217,7 @@ print(f"Total length: {stats['total_length_m']:.1f} m")
 print(f"Road classes: {stats['road_classes']}")
 
 # Method 2: Load roads by bounding box
-from src.road_loader import get_roads_in_bbox
+from src.loaders.road import get_roads_in_bbox
 
 bbox = (2682500, 1247500, 2683000, 1248000)  # EPSG:2056
 roads, stats = get_roads_in_bbox(bbox)
@@ -273,33 +273,33 @@ The tool supports Swiss vegetation and forest data:
 Load vegetation programmatically:
 
 ```python
-from src.vegetation_loader import SwissVegetationLoader, get_vegetation_around_egrid
+from src.loaders.forest import SwissForestLoader, get_trees_around_egrid
 
-# Method 1: Load vegetation by EGRID
-vegetation, stats = get_vegetation_around_egrid(
+# Method 1: Load trees/forest by EGRID
+trees, stats = get_trees_around_egrid(
     egrid="CH999979659148",
-    buffer_m=10  # Include vegetation within 10m of parcel
+    buffer_m=10  # Include trees within 10m of parcel
 )
 
-print(f"Found {stats['count']} vegetation features")
+print(f"Found {stats['count']} tree/forest features")
 print(f"Total canopy area: {stats['total_canopy_area_m2']:.1f} m²")
 print(f"Average height: {stats['avg_height_m']:.1f} m")
 
-# Method 2: Load vegetation by bounding box
-from src.vegetation_loader import get_vegetation_in_bbox
+# Method 2: Load trees by bounding box
+from src.loaders.forest import get_trees_in_bbox
 
 bbox = (2682500, 1247500, 2683000, 1248000)  # EPSG:2056
-vegetation, stats = get_vegetation_in_bbox(bbox)
+trees, stats = get_trees_in_bbox(bbox)
 
-# Method 3: Load vegetation around a point
-loader = SwissVegetationLoader()
-vegetation = loader.get_vegetation_around_point(x=2683000, y=1248000, radius=500)
+# Method 3: Load trees around a point
+loader = SwissForestLoader()
+trees = loader.get_trees_around_point(x=2683000, y=1248000, radius=500)
 
-for veg in vegetation:
-    print(f"Vegetation {veg.id}:")
-    print(f"  Type: {veg.vegetation_type}")
-    print(f"  Height: {veg.height:.1f}m" if veg.height else "  Height: Unknown")
-    print(f"  Canopy area: {veg.canopy_area:.1f}m²" if veg.canopy_area else "")
+for tree in trees:
+    print(f"Tree {tree.id}:")
+    print(f"  Type: {tree.tree_type}")
+    print(f"  Height: {tree.height:.1f}m" if tree.height else "  Height: Unknown")
+    print(f"  Canopy area: {tree.canopy_area:.1f}m²" if tree.canopy_area else "")
 ```
 
 ### Vegetation Types
