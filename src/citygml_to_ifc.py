@@ -10,7 +10,7 @@ from typing import List, Optional, Tuple
 import ifcopenshell
 import ifcopenshell.api
 
-from src.citygml_loader import CityGMLBuilding
+from src.loaders.building import CityGMLBuilding
 
 
 logger = logging.getLogger(__name__)

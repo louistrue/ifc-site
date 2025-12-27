@@ -7,7 +7,9 @@ Convert Swiss cadastral parcels into comprehensive 3D IFC (Industry Foundation C
 - **Cadastral boundaries** - Fetch Swiss parcels via EGRID from geo.admin.ch
 - **3D terrain generation** - Circular terrain mesh with precise site cutout
 - **Building footprints & 3D models** - Load buildings from Swiss APIs (CityGML, Vector 25k)
-- **Complete BIM models** - Site + terrain + buildings in a single georeferenced IFC file
+- **Road network data** - Load Swiss road and transportation network from swissTLM3D
+- **Vegetation & forest data** - Load trees, forests, and vegetation from swissTLM3D
+- **Complete BIM models** - Site + terrain + buildings + roads + vegetation in georeferenced IFC
 - **IFC4 compliance** - Proper georeferencing (EPSG:2056), property sets, and schema compliance
 - **FastAPI service** - RESTful API for terrain and building generation
 - **Multiple workflows** - Choose terrain-only, site-only, or complete models
@@ -177,6 +179,139 @@ stats = loader.get_building_statistics(buildings)
 #   'buildings_with_height': 38
 # }
 ```
+
+## Road Network Integration
+
+### Supported Road Data Sources
+
+The tool supports Swiss road and transportation network data:
+
+1. **swissTLM3D Roads** - Complete road and path network
+   - Source: Swiss Topographic Landscape Model
+   - Format: Line geometry with classification and attributes
+   - Coverage: Switzerland and Liechtenstein
+
+2. **Vector 25k Roads** - Topographic road representation
+   - Source: swisstopo Vector 25
+   - Format: Simplified road network
+
+3. **Main Roads Network** - Highway and main road network
+   - Source: ASTRA (Federal Roads Office)
+   - Format: Major road corridors
+
+### Road Loader API
+
+Load roads programmatically:
+
+```python
+from src.loaders.road import SwissRoadLoader, get_roads_around_egrid
+
+# Method 1: Load roads by EGRID
+roads, stats = get_roads_around_egrid(
+    egrid="CH999979659148",
+    buffer_m=10  # Include roads within 10m of parcel
+)
+
+print(f"Found {stats['count']} roads")
+print(f"Total length: {stats['total_length_m']:.1f} m")
+print(f"Road classes: {stats['road_classes']}")
+
+# Method 2: Load roads by bounding box
+from src.loaders.road import get_roads_in_bbox
+
+bbox = (2682500, 1247500, 2683000, 1248000)  # EPSG:2056
+roads, stats = get_roads_in_bbox(bbox)
+
+# Method 3: Load roads around a point
+loader = SwissRoadLoader()
+roads = loader.get_roads_around_point(x=2683000, y=1248000, radius=500)
+
+for road in roads:
+    print(f"Road {road.id}:")
+    print(f"  Class: {road.road_class}")
+    print(f"  Name: {road.name or 'Unnamed'}")
+    print(f"  Length: {road.geometry.length:.1f}m")
+```
+
+### Road Classification
+
+Swiss roads are classified into categories:
+- **Autobahn** - Highway/Motorway
+- **Autostrasse** - Expressway
+- **Hauptstrasse** - Main road
+- **Nebenstrasse** - Secondary road
+- **Verbindungsstrasse** - Connecting road
+- **Gemeindestrasse** - Local road
+- **Privatstrasse** - Private road
+- **Weg** - Path/Track
+- **Fussweg** - Footpath
+
+## Vegetation and Forest Data
+
+### Supported Vegetation Data Sources
+
+The tool supports Swiss vegetation and forest data:
+
+1. **swissTLM3D Forest** - Forest polygons with classification
+   - Best for: Forest areas, tree cover analysis
+   - Source: Swiss Topographic Landscape Model
+   - Format: Polygon geometry with type classification
+   - Types: Forest, Sparse forest, Bush forest
+
+2. **Vegetation 3D** - 3D vegetation objects
+   - Best for: Individual trees and vegetation features
+   - Source: swisstopo 3D data
+   - Format: Point/polygon with height data
+
+3. **Vegetation Health Index** - Satellite-based vegetation monitoring
+   - Best for: Current vegetation health status
+   - Source: swissEO satellite observations
+   - Format: Raster with vegetation indices
+
+### Vegetation Loader API
+
+Load vegetation programmatically:
+
+```python
+from src.loaders.forest import SwissForestLoader, get_trees_around_egrid
+
+# Method 1: Load trees/forest by EGRID
+trees, stats = get_trees_around_egrid(
+    egrid="CH999979659148",
+    buffer_m=10  # Include trees within 10m of parcel
+)
+
+print(f"Found {stats['count']} tree/forest features")
+print(f"Total canopy area: {stats['total_canopy_area_m2']:.1f} m²")
+print(f"Average height: {stats['avg_height_m']:.1f} m")
+
+# Method 2: Load trees by bounding box
+from src.loaders.forest import get_trees_in_bbox
+
+bbox = (2682500, 1247500, 2683000, 1248000)  # EPSG:2056
+trees, stats = get_trees_in_bbox(bbox)
+
+# Method 3: Load trees around a point
+loader = SwissForestLoader()
+trees = loader.get_trees_around_point(x=2683000, y=1248000, radius=500)
+
+for tree in trees:
+    print(f"Tree {tree.id}:")
+    print(f"  Type: {tree.tree_type}")
+    print(f"  Height: {tree.height:.1f}m" if tree.height else "  Height: Unknown")
+    print(f"  Canopy area: {tree.canopy_area:.1f}m²" if tree.canopy_area else "")
+```
+
+### Vegetation Types
+
+Swiss vegetation is classified into types:
+- **Forest** (Wald) - Dense forest areas
+- **Sparse forest** (Wald_offen) - Open forest with lower density
+- **Bush forest** (Buschwald) - Shrubland and bushes
+- **Individual tree** (Einzelbaum) - Single trees
+- **Row of trees** (Baumreihe) - Linear tree arrangements
+- **Hedge** (Hecke) - Hedgerows
+- **Scrubland** (Gebueschwald) - Mixed scrub vegetation
 
 ## FastAPI Service
 
@@ -395,6 +530,12 @@ python --version
 - **Buildings (Vector 25k):** swisstopo topographic maps
 - **Buildings (3D):** Swiss Buildings 3D STAC API
 - **CityGML:** LOD2 building models with complete geometry
+- **Roads (swissTLM3D):** Swiss Topographic Landscape Model road network
+- **Roads (Vector 25k):** Topographic road representation
+- **Roads (Main network):** ASTRA main roads network
+- **Vegetation (swissTLM3D):** Forest polygons and vegetation areas
+- **Vegetation (3D):** 3D vegetation objects and individual trees
+- **Vegetation Health:** SwissEO satellite-based vegetation monitoring
 
 ### API Endpoints
 
@@ -402,6 +543,19 @@ python --version
 - Height: `https://api3.geo.admin.ch/rest/services/height`
 - Buildings REST: `https://api3.geo.admin.ch/rest/services/api/MapServer/identify`
 - Buildings STAC: `https://data.geo.admin.ch/api/stac/v1`
+- Roads: `https://api3.geo.admin.ch/rest/services/api/MapServer/identify`
+- Vegetation: `https://api3.geo.admin.ch/rest/services/api/MapServer/identify`
+
+### Available Layers
+
+- `ch.swisstopo.swissbuildings3d_3_0` - 3D building models (STAC)
+- `ch.swisstopo.vec25-gebaeude` - Building footprints (REST)
+- `ch.swisstopo.swisstlm3d-strassen` - Complete road network (REST)
+- `ch.swisstopo.vec25-strassennetz` - Vector 25k roads (REST)
+- `ch.astra.hauptstrassennetz` - Main roads network (REST)
+- `ch.swisstopo.swisstlm3d-wald` - Forest areas (REST)
+- `ch.swisstopo.vegetation.3d` - 3D vegetation objects (3D Tiles)
+- `ch.swisstopo.swisseo_vhi_v100` - Vegetation Health Index (Raster)
 
 ## Docker Deployment
 
@@ -440,6 +594,9 @@ Generated IFC files contain:
 - [IFC4 Schema](https://www.buildingsmart.org/standards/bsi-standards/industry-foundation-classes-ifc/)
 - [Swiss LV95 Coordinate System](https://www.swisstopo.admin.ch/en/knowledge-facts/surveying-geodesy/reference-systems/switzerland.html)
 - [Swiss Buildings 3D](https://www.swisstopo.admin.ch/en/geodata/landscape/buildings3d2.html)
+- [swissTLM3D Topographic Landscape Model](https://www.swisstopo.admin.ch/en/landscape-model-swisstlm3d)
+- [swissTLM3D Roads and Tracks](https://opendata.swiss/en/dataset/swisstlm3d-strassen-und-wege)
+- [swissTLM3D Forest](https://opendata.swiss/en/dataset/swisstlm3d-wald)
 - [buildingSMART Property Sets](https://www.buildingsmart.org/standards/bsi-standards/ifc-library/)
 
 ## License
