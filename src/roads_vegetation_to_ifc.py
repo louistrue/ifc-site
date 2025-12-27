@@ -19,7 +19,18 @@ from typing import TYPE_CHECKING
 # VegetationFeature is no longer used - replaced by TreeFeature from forest loader
 # But we need a type alias for legacy function signatures
 if TYPE_CHECKING:
-    from typing import Any as VegetationFeature
+    from typing import Protocol
+    
+    class VegetationFeature(Protocol):
+        """Protocol for vegetation features (legacy compatibility)."""
+        id: str
+        geometry: object
+        height: Optional[float]
+        vegetation_type: str
+        canopy_area: Optional[float]
+        tree_species: Optional[str]
+        density: Optional[float]
+        is_coniferous: bool
 else:
     # Dummy type for runtime (legacy functions not used)
     VegetationFeature = type('VegetationFeature', (), {})
@@ -944,25 +955,8 @@ def _create_tree_geometry(
         None
     )
     
-    # For a cone, we create a tapered extrusion (smaller top)
-    # IFC doesn't have direct cone support, so we'll use a frustum (truncated cone)
-    # Top radius is 0.1m (almost a point)
-    top_radius = 0.1
-    # Create top profile (smaller circle)
-    top_profile_points = []
-    for i in range(num_segments * 2):
-        angle = 2 * math.pi * i / (num_segments * 2)
-        x = center_x + top_radius * math.cos(angle)
-        y = center_y + top_radius * math.sin(angle)
-        top_profile_points.append(model.createIfcCartesianPoint([x, y]))
-    top_profile_points.append(top_profile_points[0])
-    
-    top_polyline = model.createIfcPolyLine(top_profile_points)
-    top_profile = model.createIfcArbitraryClosedProfileDef(
-        "AREA",
-        None,
-        top_polyline
-    )
+    # Note: Tapered extrusion (frustum) was planned but not implemented
+    # The canopy is created as a simple extrusion instead
     
     # Create swept disk solid for canopy (simpler cone approximation)
     # Use IfcRevolvedAreaSolid to create a cone by revolving a triangle
@@ -1778,6 +1772,32 @@ def forest_to_ifc(
     
     print(f"    Placing {len(forest_points)} tree/hedge instances...")
     
+    # Wrapper class to convert TreeFeature to format expected by hedge_to_ifc
+    # Moved outside loop to avoid repeated class creation overhead
+    class HedgeWrapper:
+        def __init__(self, tree_feature):
+            self.id = tree_feature.id
+            # Buffer the LineString to create a polygon
+            from shapely.geometry import Polygon
+            coords = list(tree_feature.geometry.coords)
+            if len(coords) >= 3:
+                # Create a simple buffered polygon
+                buffered = tree_feature.geometry.buffer(0.5)  # 0.5m width hedge
+                if buffered.geom_type == 'Polygon':
+                    self.geometry = buffered
+                else:
+                    # Fallback to simple polygon from coords
+                    self.geometry = Polygon(coords)
+            else:
+                self.geometry = Polygon([])
+            self.height = None
+            self.vegetation_type = "hedge"
+            # Add missing attributes expected by _add_vegetation_properties
+            self.canopy_area = None
+            self.tree_species = None
+            self.density = None
+            self.is_coniferous = False
+    
     ifc_trees = []
     deciduous_count = 0
     coniferous_count = 0
@@ -1785,32 +1805,6 @@ def forest_to_ifc(
     for i, tree_feature in enumerate(forest_points):
         # Handle hedges differently
         if tree_feature.feature_type == "hedge":
-            # Create hedge geometry - need to convert TreeFeature to format hedge_to_ifc expects
-            # Create a wrapper object for hedge_to_ifc
-            class HedgeWrapper:
-                def __init__(self, tree_feature):
-                    self.id = tree_feature.id
-                    # Buffer the LineString to create a polygon
-                    from shapely.geometry import Polygon
-                    coords = list(tree_feature.geometry.coords)
-                    if len(coords) >= 3:
-                        # Create a simple buffered polygon
-                        buffered = tree_feature.geometry.buffer(0.5)  # 0.5m width hedge
-                        if buffered.geom_type == 'Polygon':
-                            self.geometry = buffered
-                        else:
-                            # Fallback to simple polygon from coords
-                            self.geometry = Polygon(coords)
-                    else:
-                        self.geometry = Polygon([])
-                    self.height = None
-                    self.vegetation_type = "hedge"
-                    # Add missing attributes expected by _add_vegetation_properties
-                    self.canopy_area = None
-                    self.tree_species = None
-                    self.density = None
-                    self.is_coniferous = False
-            
             hedge = hedge_to_ifc(
                 model, HedgeWrapper(tree_feature), site, body_context,
                 offset_x, offset_y, offset_z, base_elevation=tree_feature.z

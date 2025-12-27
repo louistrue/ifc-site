@@ -5,11 +5,11 @@ Fetches cadastral parcel boundaries from Swiss geo.admin.ch API.
 """
 
 import requests
-from shapely.geometry import shape
+from shapely.geometry import shape, Polygon
 from typing import Tuple, Optional, Dict
 
 
-def fetch_boundary_by_egrid(egrid: str) -> Tuple[Optional[object], Optional[Dict]]:
+def fetch_boundary_by_egrid(egrid: str) -> Tuple[Optional[Polygon], Optional[Dict]]:
     """
     Fetch the cadastral boundary (Polygon) and metadata for a given EGRID via geo.admin.ch API.
     

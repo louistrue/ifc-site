@@ -164,7 +164,7 @@ def apply_water_cutouts_to_terrain(waters, terrain_coords=None, terrain_elevatio
     if edge_coords:
         if terrain_coords is not None and terrain_elevations is not None and len(terrain_coords) > 0:
             # FAST: Interpolate from existing terrain data
-            print(f"  Interpolating water edge elevations from terrain data...")
+            print("  Interpolating water edge elevations from terrain data...")
             try:
                 terrain_points = np.array(terrain_coords)
                 terrain_z = np.array(terrain_elevations)
@@ -275,7 +275,7 @@ def apply_road_recesses_to_terrain(roads, terrain_coords=None, terrain_elevation
     if edge_coords:
         if terrain_coords is not None and terrain_elevations is not None and len(terrain_coords) > 0:
             # FAST: Interpolate from existing terrain data (no API calls!)
-            print(f"  Interpolating elevations from terrain data...")
+            print("  Interpolating elevations from terrain data...")
             try:
                 terrain_points = np.array(terrain_coords)
                 terrain_z = np.array(terrain_elevations)
@@ -360,7 +360,7 @@ def triangulate_terrain_with_cutout(
             clipped_site = site_polygon.intersection(terrain_boundary)
             if not clipped_site.is_empty:
                 terrain_poly = terrain_poly.difference(clipped_site.buffer(0.1))
-                print(f"  Subtracted site boundary")
+                print("  Subtracted site boundary")
         except Exception as e:
             logger.warning(f"Could not subtract site: {e}")
     
@@ -372,7 +372,7 @@ def triangulate_terrain_with_cutout(
                 # Simplify roads slightly to avoid tiny segments
                 simplified_roads = clipped_roads.simplify(0.5, preserve_topology=True)
                 terrain_poly = terrain_poly.difference(simplified_roads)
-                print(f"  Subtracted road areas")
+                print("  Subtracted road areas")
         except Exception as e:
             logger.warning(f"Could not subtract roads: {e}")
     
@@ -383,7 +383,7 @@ def triangulate_terrain_with_cutout(
             if not clipped_water.is_empty:
                 simplified_water = clipped_water.simplify(0.5, preserve_topology=True)
                 terrain_poly = terrain_poly.difference(simplified_water)
-                print(f"  Subtracted water areas")
+                print("  Subtracted water areas")
         except Exception as e:
             logger.warning(f"Could not subtract water: {e}")
     

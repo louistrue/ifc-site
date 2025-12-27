@@ -4,7 +4,10 @@ IFC model builder
 Creates IFC files with terrain, site solid, roads, trees, water, and buildings.
 """
 
-# Patch dataclasses for Python 3.9 compatibility (ifcopenshell uses slots=True)
+# Patch dataclasses for Python 3.9 compatibility
+# ifcopenshell uses slots=True in dataclass decorators, which is not supported in Python 3.9
+# This monkey-patch removes the slots parameter before calling the original dataclass decorator
+# TODO: Remove this patch when Python 3.9 support is dropped (Python 3.10+ supports slots=True)
 import dataclasses
 _original_dataclass = dataclasses.dataclass
 def _patched_dataclass(*args, **kwargs):
@@ -127,7 +130,7 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
     )
     
     # Calculate offsets - center on site
-    minx, miny, maxx, maxy = bounds
+    _minx, _miny, _maxx, _maxy = bounds  # Unpacked but individual values not used
     offset_x = round(center_x, -2)  # Round to nearest 100m
     offset_y = round(center_y, -2)
     
@@ -468,7 +471,7 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
                 fetch_elevations_func=fetch_elevation_batch
             )
             print(f"  Added {len(ifc_waters)} water elements")
-        except Exception as e:
+        except Exception:
             import traceback
             traceback.print_exc()
             print(f"  Continuing without water...")
@@ -484,7 +487,7 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
                 offset_x, offset_y, offset_z
             )
             print(f"  Added {len(ifc_buildings)} buildings")
-        except Exception as e:
+        except Exception:
             import traceback
             traceback.print_exc()
             print(f"  Continuing without buildings...")

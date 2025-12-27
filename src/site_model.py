@@ -49,7 +49,7 @@ def run_combined_terrain_workflow(
         radius: Radius of circular terrain area (meters)
         resolution: Grid resolution (meters)
         densify: Site boundary densification interval (meters)
-        attach_to_solid: Attach terrain to smoothed site solid edges
+        attach_to_solid: Attach terrain to smoothed site solid edges (TODO: not yet implemented)
         include_terrain: Include surrounding terrain mesh
         include_site_solid: Include site solid
         include_roads: Include roads
@@ -57,8 +57,8 @@ def run_combined_terrain_workflow(
         include_water: Include water features
         include_buildings: Include buildings from CityGML
         road_buffer_m: Buffer distance for road search (meters)
-        forest_spacing: Spacing between forest sample points (meters)
-        forest_threshold: Minimum forest coverage to place tree (0-100)
+        forest_spacing: Spacing between forest sample points (meters) (TODO: not yet implemented - kept for compatibility)
+        forest_threshold: Minimum forest coverage to place tree (0-100) (TODO: not yet implemented - kept for compatibility)
         road_recess_depth: Depth to recess roads into terrain (meters)
         embed_roads_in_terrain: Embed roads in terrain mesh vs separate elements
         output_path: Output IFC file path
@@ -160,9 +160,7 @@ def run_combined_terrain_workflow(
                     for cls, count in road_stats['road_classes'].items():
                         print(f"    - {cls}: {count}")
             except Exception as e:
-                import traceback
-                print(f"  ERROR loading roads: {e}")
-                traceback.print_exc()
+                logger.exception("Error loading roads")
                 roads = None
 
         # Apply road recesses if roads are included
@@ -281,9 +279,7 @@ def run_combined_terrain_workflow(
                         terrain_boundary=terrain_boundary
                     )
             except Exception as e:
-                import traceback
-                print(f"  ERROR loading water: {e}")
-                traceback.print_exc()
+                logger.exception("Error loading water")
                 waters = None
 
         # Triangulate terrain with cutouts (site, roads, and surface water)
@@ -337,9 +333,7 @@ def run_combined_terrain_workflow(
             )
             print(f"  Found {len(forest_points)} trees/hedges")
         except Exception as e:
-            import traceback
-            print(f"  ERROR loading forest: {e}")
-            traceback.print_exc()
+            logger.exception("Error loading forest")
             forest_points = None
 
     # If water wasn't loaded during terrain processing (e.g., terrain disabled), load it now
@@ -352,9 +346,7 @@ def run_combined_terrain_workflow(
             waters = loader.get_water_in_bounds(bounds)
             print(f"  Found {len(waters)} water features")
         except Exception as e:
-            import traceback
-            print(f"  ERROR loading water: {e}")
-            traceback.print_exc()
+            logger.exception("Error loading water")
             waters = None
 
     buildings = None
@@ -370,9 +362,7 @@ def run_combined_terrain_workflow(
                 for i, b in enumerate(buildings[:5]):
                     print(f"    {i+1}. {b.id} - {b.building_type if b.building_type else 'unknown'} - {len(b.faces)} faces")
         except Exception as e:
-            import traceback
-            print(f"  ERROR loading buildings: {e}")
-            traceback.print_exc()
+            logger.exception("Error loading buildings")
             buildings = None
 
     # Create IFC file

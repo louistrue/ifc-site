@@ -14,7 +14,7 @@ from threading import Lock
 
 import requests
 from shapely.geometry import shape, box, LineString, MultiLineString, Polygon
-from shapely.ops import unary_union, linemerge
+from shapely.ops import linemerge
 
 try:
     from pyproj import Transformer
@@ -25,6 +25,11 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+class ConfigurationError(ValueError):
+    """Raised when loader configuration is invalid."""
+    pass
 
 
 @dataclass
@@ -134,6 +139,7 @@ class SwissRoadLoader:
             return self.transformer_to_wgs84.transform(x, y)
         else:
             # Rough approximation if pyproj not available
+            logger.debug("Using approximate coordinate conversion (pyproj unavailable)")
             lon = (x - 2600000) / 111320 + 7.44
             lat = (y - 1200000) / 111320 + 46.0
             return lon, lat
@@ -161,7 +167,7 @@ class SwissRoadLoader:
             requests.RequestException: If all retries fail
         """
         if self.retry_count < 1:
-            raise ValueError("retry_count must be at least 1")
+            raise ConfigurationError("retry_count must be at least 1")
 
         last_exception = None
 
@@ -257,7 +263,7 @@ class SwissRoadLoader:
                                 break
                                 
                 except Exception as e:
-                    logger.warning(f"Grid cell query failed: {e}")
+                    logger.warning(f"Grid cell query failed: {e}", exc_info=True)
                     continue
                     
                 if len(all_roads) >= max_features:
@@ -390,14 +396,11 @@ class SwissRoadLoader:
         # Import here to avoid circular dependency
         try:
             from src.loaders.cadastre import fetch_boundary_by_egrid
-        except (ImportError, ModuleNotFoundError):
-            try:
-                from loaders.cadastre import fetch_boundary_by_egrid
-            except (ImportError, ModuleNotFoundError):
-                from terrain_with_site import fetch_boundary_by_egrid
+        except ImportError:
+            from loaders.cadastre import fetch_boundary_by_egrid
 
         # Get parcel boundary (metadata not used here)
-        site_boundary, _ = fetch_boundary_by_egrid(egrid)
+        site_boundary, _metadata = fetch_boundary_by_egrid(egrid)
         if site_boundary is None:
             logger.warning(f"No boundary found for EGRID {egrid}")
             return []
@@ -527,7 +530,7 @@ if __name__ == "__main__":
     bbox = (2682500, 1247500, 2683000, 1248000)  # 500m x 500m
     try:
         roads, stats = get_roads_in_bbox(bbox)
-        print(f"\nStatistics:")
+        print("\nStatistics:")
         for key, value in stats.items():
             if isinstance(value, dict):
                 print(f"  {key}:")
@@ -546,7 +549,7 @@ if __name__ == "__main__":
 
         try:
             roads, stats = get_roads_around_egrid(sys.argv[1], buffer_m=10)
-            print(f"\nStatistics:")
+            print("\nStatistics:")
             for key, value in stats.items():
                 if isinstance(value, dict):
                     print(f"  {key}:")

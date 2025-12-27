@@ -8,7 +8,6 @@ This replaces the slow raster-based approach with a fast REST API query.
 """
 
 import logging
-import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict
 import requests
@@ -105,7 +104,7 @@ class SwissTreeLoader:
                 print(f"  Fetching elevations for {len(features)} features...")
                 coords = [(f.x, f.y) for f in features]
                 elevations = fetch_elevations_func(coords)
-                for feature, elev in zip(features, elevations):
+                for feature, elev in zip(features, elevations, strict=True):
                     feature.z = elev
             
             return features

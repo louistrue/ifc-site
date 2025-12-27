@@ -9,6 +9,12 @@ import math
 from shapely.geometry import Polygon
 from typing import List, Tuple
 
+try:
+    from scipy.spatial import cKDTree
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
 
 def _circular_mean(values: List[float], window_size: int) -> List[float]:
     """Smooth values with a circular mean filter."""
@@ -48,6 +54,7 @@ def _best_fit_plane(ext_coords: List[Tuple[float, float, float]]) -> List[float]
 
 def create_site_solid_coords(site_polygon, site_coords_3d: List[Tuple[float, float, float]], 
                              z_offset_adjustment: float = 0.0):
+    # Note: site_polygon parameter is reserved for future use (e.g., validation or additional processing)
     """
     Create smoothed site solid coordinates with height adjustment.
     
@@ -109,18 +116,27 @@ def calculate_height_offset(site_polygon, site_coords_3d: List[Tuple[float, floa
     # Sample terrain elevations at site boundary points
     boundary_terrain_z = []
     
-    for x, y, _ in site_coords_3d:
-        # Find closest terrain point
-        min_dist = float('inf')
-        closest_z = None
-        for idx, (tx, ty) in enumerate(terrain_coords):
-            dist = math.sqrt((tx - x)**2 + (ty - y)**2)
-            if dist < min_dist:
-                min_dist = dist
-                closest_z = terrain_elevations[idx]
-        
-        if closest_z is not None:
-            boundary_terrain_z.append(closest_z)
+    if SCIPY_AVAILABLE and len(terrain_coords) > 100:
+        # Use spatial index for large datasets (O(n log n) instead of O(n×m))
+        terrain_points = np.array(terrain_coords)
+        tree = cKDTree(terrain_points)
+        for x, y, _ in site_coords_3d:
+            _, idx = tree.query([x, y], k=1)
+            boundary_terrain_z.append(terrain_elevations[idx])
+    else:
+        # Fallback to linear search for small datasets or when scipy unavailable
+        for x, y, _ in site_coords_3d:
+            # Find closest terrain point
+            min_dist = float('inf')
+            closest_z = None
+            for idx, (tx, ty) in enumerate(terrain_coords):
+                dist = math.sqrt((tx - x)**2 + (ty - y)**2)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_z = terrain_elevations[idx]
+            
+            if closest_z is not None:
+                boundary_terrain_z.append(closest_z)
     
     if not boundary_terrain_z:
         return 0.0

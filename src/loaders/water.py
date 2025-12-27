@@ -154,7 +154,7 @@ class SwissWaterLoader:
             
             if coords:
                 elevations = fetch_elevations_func(coords)
-                for feature, elev in zip(features, elevations):
+                for feature, elev in zip(features, elevations, strict=True):
                     if feature.attributes is None:
                         feature.attributes = {}
                     feature.attributes['elevation'] = elev
@@ -205,7 +205,7 @@ class SwissWaterLoader:
             return features
             
         except Exception as e:
-            logger.error(f"swissTLM3D query failed: {e}")
+            logger.exception("swissTLM3D query failed")
             return []
     
     def _fetch_from_vec25(self, minx, miny, maxx, maxy, map_extent, max_features) -> List[WaterFeature]:
@@ -238,7 +238,7 @@ class SwissWaterLoader:
             return features
             
         except Exception as e:
-            logger.error(f"vec25 query failed: {e}")
+            logger.exception("vec25 query failed")
             return []
     
     def _parse_tlm3d_result(self, result: Dict, is_polygon: bool) -> Optional[WaterFeature]:
@@ -336,7 +336,8 @@ class SwissWaterLoader:
                 # Try shapely shape() as fallback
                 try:
                     geom = shape(geom_data)
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Fallback geometry parsing failed for water feature {feature_id}: {e}")
                     pass
             
             if geom is None:
