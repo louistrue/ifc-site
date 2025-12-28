@@ -96,7 +96,8 @@ class SwissWaterLoader:
                             if diff.geom_type == 'Polygon':
                                 rf.geometry = diff
                                 filtered_rivers.append(rf)
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Error processing river overlap with lakes: {e}")
                     pass
             all_features = lake_features + filtered_rivers
         
@@ -112,7 +113,8 @@ class SwissWaterLoader:
                     if clipped_geom.geom_type == 'Polygon':
                         f.geometry = clipped_geom
                         clipped.append(f)
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Error clipping water feature: {e}")
                 pass
         
         print(f"    Total: {len(clipped)} water features")
@@ -122,7 +124,7 @@ class SwissWaterLoader:
             coords = [(f.geometry.centroid.x, f.geometry.centroid.y) for f in clipped]
             if coords:
                 elevations = fetch_elevations_func(coords)
-                for feature, elev in zip(clipped, elevations):
+                for feature, elev in zip(clipped, elevations, strict=True):
                     if feature.attributes is None:
                         feature.attributes = {}
                     feature.attributes['elevation'] = elev
@@ -289,7 +291,8 @@ class SwissWaterLoader:
                             attributes={'source': 'foen_raster'}
                         )
                         features.append(feature)
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Error creating river polygon from contour: {e}")
                     pass
             
             features.sort(key=lambda f: f.geometry.area, reverse=True)

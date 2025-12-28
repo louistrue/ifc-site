@@ -377,7 +377,7 @@ def run_combined_terrain_workflow(
                 print("  Railway types:")
                 for rt, count in railway_types.items():
                     print(f"    - {rt}: {count}")
-        except Exception as e:
+        except Exception:
             logger.exception("Error loading railways")
             railways = None
 
@@ -398,13 +398,13 @@ def run_combined_terrain_workflow(
                 print("  Bridge types:")
                 for ct, count in carries_types.items():
                     print(f"    - {ct}: {count}")
-        except Exception as e:
+        except Exception:
             logger.exception("Error loading bridges")
             bridges = None
 
     buildings = None
     if include_buildings:
-        print(f"\nLoading buildings...")
+        print("\nLoading buildings...")
         try:
             from src.loaders.building import CityGMLBuildingLoader
             loader = CityGMLBuildingLoader()

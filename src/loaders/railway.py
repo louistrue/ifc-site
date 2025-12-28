@@ -9,8 +9,6 @@ import logging
 import time
 from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass
-from functools import wraps
-from threading import Lock
 
 import requests
 from shapely.geometry import LineString, Point
@@ -22,32 +20,12 @@ except ImportError:
     PYPROJ_AVAILABLE = False
     logging.warning("pyproj not available - coordinate conversion limited")
 
+from src.loaders.overpass_utils import rate_limit_overpass
 
 logger = logging.getLogger(__name__)
 
 # Overpass API endpoint
 OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
-
-# Rate limiting for Overpass API (10 requests per minute)
-_rate_limit_lock = Lock()
-_last_request_time = [0.0]
-_min_request_interval = 6.0  # 6 seconds = 10 requests per minute
-
-
-def rate_limit_overpass(func):
-    """Thread-safe rate limiting decorator for Overpass API"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        global _last_request_time
-        with _rate_limit_lock:
-            elapsed = time.time() - _last_request_time[0]
-            left_to_wait = _min_request_interval - elapsed
-            if left_to_wait > 0:
-                time.sleep(left_to_wait)
-            _last_request_time[0] = time.time()
-        
-        return func(*args, **kwargs)
-    return wrapper
 
 
 @dataclass
@@ -145,7 +123,7 @@ class SwissRailwayLoader:
                 if attempt < self.retry_count - 1:
                     time.sleep(2 ** attempt)  # Exponential backoff
                 else:
-                    logger.error(f"All Overpass API retries failed")
+                    logger.exception("All Overpass API retries failed")
                     return None
         return None
     

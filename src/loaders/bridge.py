@@ -9,8 +9,6 @@ import logging
 import time
 from typing import Optional, Tuple, List, Dict
 from dataclasses import dataclass
-from functools import wraps
-from threading import Lock
 
 import requests
 from shapely.geometry import LineString, Point
@@ -22,32 +20,12 @@ except ImportError:
     PYPROJ_AVAILABLE = False
     logging.warning("pyproj not available - coordinate conversion limited")
 
+from src.loaders.overpass_utils import rate_limit_overpass
 
 logger = logging.getLogger(__name__)
 
 # Overpass API endpoint
 OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
-
-# Rate limiting for Overpass API (10 requests per minute)
-_rate_limit_lock = Lock()
-_last_request_time = [0.0]
-_min_request_interval = 6.0  # 6 seconds = 10 requests per minute
-
-
-def rate_limit_overpass(func):
-    """Thread-safe rate limiting decorator for Overpass API"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        global _last_request_time
-        with _rate_limit_lock:
-            elapsed = time.time() - _last_request_time[0]
-            left_to_wait = _min_request_interval - elapsed
-            if left_to_wait > 0:
-                time.sleep(left_to_wait)
-            _last_request_time[0] = time.time()
-        
-        return func(*args, **kwargs)
-    return wrapper
 
 
 @dataclass
@@ -146,20 +124,32 @@ class SwissBridgeLoader:
                 if attempt < self.retry_count - 1:
                     time.sleep(2 ** attempt)  # Exponential backoff
                 else:
-                    logger.error(f"All Overpass API retries failed")
+                    logger.exception("All Overpass API retries failed")
                     return None
         return None
     
     def _determine_carries(self, tags: Dict) -> Optional[str]:
         """Determine what the bridge carries based on tags"""
-        if 'highway' in tags:
-            return 'highway'
-        elif 'railway' in tags:
+        # Check highway tag value first
+        highway_value = tags.get('highway')
+        if highway_value:
+            # Check for specific highway values that should be classified differently
+            if highway_value in ('footway', 'pedestrian'):
+                return 'footway'
+            elif highway_value == 'cycleway':
+                return 'cycleway'
+            else:
+                # Other highway values (motorway, primary, secondary, etc.)
+                return 'highway'
+        
+        # Check railway tag
+        if 'railway' in tags:
             return 'railway'
-        elif 'footway' in tags or 'pedestrian' in tags:
-            return 'footway'
-        elif 'cycleway' in tags or 'bicycle' in tags:
+        
+        # Check for dedicated cycleway or bicycle tags
+        if tags.get('cycleway') or tags.get('bicycle'):
             return 'cycleway'
+        
         return None
     
     def _estimate_width(self, tags: Dict, geometry: LineString) -> Optional[float]:

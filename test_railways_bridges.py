@@ -27,7 +27,7 @@ def main():
     print("Testing Railways and Bridges Loaders")
     print("=" * 80)
     print(f"Location: {address}")
-    print(f"Radius: 500m")
+    print("Radius: 500m")
     print()
     
     try:
@@ -50,10 +50,10 @@ def main():
         print("\n" + "=" * 80)
         print("SUCCESS: Test IFC file created!")
         print("=" * 80)
-        print(f"Output file: test_railways_bridges.ifc")
+        print("Output file: test_railways_bridges.ifc")
         print(f"Offsets: x={result[0]:.2f}, y={result[1]:.2f}, z={result[2]:.2f}")
         
-    except Exception as e:
+    except Exception:
         print("\n" + "=" * 80)
         print("ERROR: Failed to create test IFC")
         print("=" * 80)

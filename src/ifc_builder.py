@@ -70,7 +70,8 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
         If return_model=True: (model, offset_x, offset_y, offset_z)
         If return_model=False: (offset_x, offset_y, offset_z)
     """
-    model = ifcopenshell.file(schema='IFC4')
+    # Use IFC 4.3 (IFC4X3) to support alignment entities for railways
+    model = ifcopenshell.file(schema='IFC4X3')
     
     # Create OwnerHistory (required by many IFC viewers for psets)
     person = model.createIfcPerson(FamilyName="User")
@@ -495,7 +496,7 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
             import traceback
             print(f"  ERROR adding railways: {e}")
             traceback.print_exc()
-            print(f"  Continuing without railways...")
+            print("  Continuing without railways...")
 
     # Add bridges if provided
     if bridges:
@@ -513,7 +514,7 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
             import traceback
             print(f"  ERROR adding bridges: {e}")
             traceback.print_exc()
-            print(f"  Continuing without bridges...")
+            print("  Continuing without bridges...")
 
     # Add buildings if provided
     if buildings:

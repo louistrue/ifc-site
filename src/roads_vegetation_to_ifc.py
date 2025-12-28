@@ -2059,7 +2059,6 @@ def _create_railway_type_geometry(
         (half_sleeper_length, half_sleeper_width, sleeper_z),
         (-half_sleeper_length, half_sleeper_width, sleeper_z),
     ]
-    sleeper_top = [p[:2] + (0.0,) for p in sleeper_points]
     
     # Sleeper top face
     faces.append(sleeper_points)
@@ -2326,36 +2325,215 @@ def railway_to_ifc(
         relating_structure=site
     )
     
-    # Create swept path representation along the railway line
-    # This creates the actual track geometry following the path
+    # Create proper railway geometry with two rails and instanced sleepers
     representations = []
+    import math
     
-    # Create polyline representation for the track path
+    # Prepare coordinates relative to placement origin
     if elevations and len(elevations) == len(coords):
-        track_points = [
-            model.createIfcCartesianPoint([
-                float(x - offset_x),
-                float(y - offset_y),
-                float(z - offset_z)
-            ])
+        coords_3d = [
+            (float(x - first_x), float(y - first_y), float(z - z_adjustment))
             for (x, y), z in zip(coords, elevations)
         ]
     else:
-        default_z = z_adjustment - offset_z
-        track_points = [
-            model.createIfcCartesianPoint([
-                float(x - offset_x),
-                float(y - offset_y),
-                default_z
-            ])
+        coords_3d = [
+            (float(x - first_x), float(y - first_y), 0.0)
             for x, y in coords
         ]
     
-    polyline = model.createIfcPolyLine(track_points)
-    path_rep = model.createIfcShapeRepresentation(
-        body_context, "Body", "Curve3D", [polyline]
-    )
-    representations.append(path_rep)
+    half_gauge = gauge / 2.0
+    all_faces = []
+    
+    # === CREATE RAILS (two parallel swept solids) ===
+    for segment_idx in range(len(coords_3d) - 1):
+        x1, y1, z1 = coords_3d[segment_idx]
+        x2, y2, z2 = coords_3d[segment_idx + 1]
+        
+        # Calculate segment direction
+        dx = x2 - x1
+        dy = y2 - y1
+        segment_length = (dx**2 + dy**2)**0.5
+        if segment_length < 0.01:
+            continue
+        
+        # Perpendicular vector (for offsetting rails left/right)
+        perp_x = -dy / segment_length
+        perp_y = dx / segment_length
+        
+        # Rail dimensions
+        half_rail_width = RAIL_HEAD_WIDTH / 2.0
+        
+        # === LEFT RAIL ===
+        # Bottom corners
+        lb1 = (x1 + perp_x * half_gauge - perp_x * half_rail_width, 
+               y1 + perp_y * half_gauge - perp_y * half_rail_width, z1)
+        lb2 = (x2 + perp_x * half_gauge - perp_x * half_rail_width, 
+               y2 + perp_y * half_gauge - perp_y * half_rail_width, z2)
+        lb3 = (x2 + perp_x * half_gauge + perp_x * half_rail_width, 
+               y2 + perp_y * half_gauge + perp_y * half_rail_width, z2)
+        lb4 = (x1 + perp_x * half_gauge + perp_x * half_rail_width, 
+               y1 + perp_y * half_gauge + perp_y * half_rail_width, z1)
+        # Top corners
+        lt1 = (lb1[0], lb1[1], lb1[2] + RAIL_HEIGHT)
+        lt2 = (lb2[0], lb2[1], lb2[2] + RAIL_HEIGHT)
+        lt3 = (lb3[0], lb3[1], lb3[2] + RAIL_HEIGHT)
+        lt4 = (lb4[0], lb4[1], lb4[2] + RAIL_HEIGHT)
+        
+        # Left rail faces
+        all_faces.append([lb1, lb2, lb3, lb4])  # Bottom
+        all_faces.append([lt4, lt3, lt2, lt1])  # Top
+        all_faces.append([lb1, lb4, lt4, lt1])  # Side 1
+        all_faces.append([lb2, lb1, lt1, lt2])  # Side 2
+        all_faces.append([lb3, lb2, lt2, lt3])  # Side 3
+        all_faces.append([lb4, lb3, lt3, lt4])  # Side 4
+        
+        # === RIGHT RAIL ===
+        # Bottom corners
+        rb1 = (x1 - perp_x * half_gauge - perp_x * half_rail_width, 
+               y1 - perp_y * half_gauge - perp_y * half_rail_width, z1)
+        rb2 = (x2 - perp_x * half_gauge - perp_x * half_rail_width, 
+               y2 - perp_y * half_gauge - perp_y * half_rail_width, z2)
+        rb3 = (x2 - perp_x * half_gauge + perp_x * half_rail_width, 
+               y2 - perp_y * half_gauge + perp_y * half_rail_width, z2)
+        rb4 = (x1 - perp_x * half_gauge + perp_x * half_rail_width, 
+               y1 - perp_y * half_gauge + perp_y * half_rail_width, z1)
+        # Top corners
+        rt1 = (rb1[0], rb1[1], rb1[2] + RAIL_HEIGHT)
+        rt2 = (rb2[0], rb2[1], rb2[2] + RAIL_HEIGHT)
+        rt3 = (rb3[0], rb3[1], rb3[2] + RAIL_HEIGHT)
+        rt4 = (rb4[0], rb4[1], rb4[2] + RAIL_HEIGHT)
+        
+        # Right rail faces
+        all_faces.append([rb1, rb2, rb3, rb4])  # Bottom
+        all_faces.append([rt4, rt3, rt2, rt1])  # Top
+        all_faces.append([rb1, rb4, rt4, rt1])  # Side 1
+        all_faces.append([rb2, rb1, rt1, rt2])  # Side 2
+        all_faces.append([rb3, rb2, rt2, rt3])  # Side 3
+        all_faces.append([rb4, rb3, rt3, rt4])  # Side 4
+    
+    # === CREATE SLEEPERS (at regular intervals along the path) ===
+    cumulative_distance = 0.0
+    sleeper_positions = []
+    
+    for segment_idx in range(len(coords_3d) - 1):
+        x1, y1, z1 = coords_3d[segment_idx]
+        x2, y2, z2 = coords_3d[segment_idx + 1]
+        
+        dx = x2 - x1
+        dy = y2 - y1
+        dz = z2 - z1
+        segment_length = (dx**2 + dy**2)**0.5
+        if segment_length < 0.01:
+            continue
+        
+        # Direction along segment
+        dir_x = dx / segment_length
+        dir_y = dy / segment_length
+        dir_z = dz / segment_length if segment_length > 0 else 0.0
+        
+        # Perpendicular vector
+        perp_x = -dir_y
+        perp_y = dir_x
+        
+        # Place sleepers along this segment
+        distance_along = 0.0
+        while cumulative_distance + distance_along < cumulative_distance + segment_length:
+            # Position for this sleeper
+            t = distance_along / segment_length if segment_length > 0 else 0
+            sx = x1 + dx * t
+            sy = y1 + dy * t
+            sz = z1 + dz * t
+            
+            # Sleeper geometry (rectangular box perpendicular to track)
+            half_sleeper_len = SLEEPER_LENGTH / 2.0
+            half_sleeper_w = SLEEPER_WIDTH / 2.0
+            sleeper_z = sz - SLEEPER_HEIGHT  # Sleepers sit below rail level
+            
+            # Sleeper corners (along track direction x perpendicular direction)
+            s1 = (sx - dir_x * half_sleeper_w + perp_x * half_sleeper_len,
+                  sy - dir_y * half_sleeper_w + perp_y * half_sleeper_len,
+                  sleeper_z)
+            s2 = (sx + dir_x * half_sleeper_w + perp_x * half_sleeper_len,
+                  sy + dir_y * half_sleeper_w + perp_y * half_sleeper_len,
+                  sleeper_z)
+            s3 = (sx + dir_x * half_sleeper_w - perp_x * half_sleeper_len,
+                  sy + dir_y * half_sleeper_w - perp_y * half_sleeper_len,
+                  sleeper_z)
+            s4 = (sx - dir_x * half_sleeper_w - perp_x * half_sleeper_len,
+                  sy - dir_y * half_sleeper_w - perp_y * half_sleeper_len,
+                  sleeper_z)
+            
+            # Top corners
+            st1 = (s1[0], s1[1], s1[2] + SLEEPER_HEIGHT)
+            st2 = (s2[0], s2[1], s2[2] + SLEEPER_HEIGHT)
+            st3 = (s3[0], s3[1], s3[2] + SLEEPER_HEIGHT)
+            st4 = (s4[0], s4[1], s4[2] + SLEEPER_HEIGHT)
+            
+            # Sleeper faces
+            all_faces.append([s1, s2, s3, s4])  # Bottom
+            all_faces.append([st4, st3, st2, st1])  # Top
+            all_faces.append([s1, s4, st4, st1])  # Side 1
+            all_faces.append([s2, s1, st1, st2])  # Side 2
+            all_faces.append([s3, s2, st2, st3])  # Side 3
+            all_faces.append([s4, s3, st3, st4])  # Side 4
+            
+            distance_along += SLEEPER_SPACING
+            if distance_along >= segment_length:
+                break
+        
+        cumulative_distance += segment_length
+    
+    # === CREATE IFC FACES ===
+    ifc_faces = []
+    for face_points in all_faces:
+        try:
+            ifc_points = [
+                model.createIfcCartesianPoint([float(p[0]), float(p[1]), float(p[2])])
+                for p in face_points
+            ]
+            polyloop = model.createIfcPolyLoop(ifc_points)
+            face_bound = model.createIfcFaceOuterBound(polyloop, True)
+            ifc_face = model.createIfcFace([face_bound])
+            ifc_faces.append(ifc_face)
+        except Exception as e:
+            logger.debug(f"Error creating face: {e}")
+            continue
+    
+    if ifc_faces:
+        try:
+            shell = model.createIfcClosedShell(ifc_faces)
+            brep = model.createIfcFacetedBrep(shell)
+            
+            # Create shape representation
+            body_rep = model.createIfcShapeRepresentation(
+                body_context, "Body", "Brep", [brep]
+            )
+            representations.append(body_rep)
+            
+            logger.debug(f"Created railway geometry with {len(all_faces)} faces for {railway_name}")
+        except Exception as e:
+            logger.warning(f"Failed to create BRep for railway: {e}")
+            # Fallback to curve
+            track_points = [
+                model.createIfcCartesianPoint([float(p[0]), float(p[1]), float(p[2])])
+                for p in coords_3d
+            ]
+            polyline = model.createIfcPolyLine(track_points)
+            curve_rep = model.createIfcShapeRepresentation(
+                body_context, "Body", "Curve3D", [polyline]
+            )
+            representations.append(curve_rep)
+    else:
+        # Fallback to curve if no faces created
+        track_points = [
+            model.createIfcCartesianPoint([float(p[0]), float(p[1]), float(p[2])])
+            for p in coords_3d
+        ]
+        polyline = model.createIfcPolyLine(track_points)
+        curve_rep = model.createIfcShapeRepresentation(
+            body_context, "Body", "Curve3D", [polyline]
+        )
+        representations.append(curve_rep)
     
     ifc_railway.Representation = model.createIfcProductDefinitionShape(
         None, None, representations
@@ -2437,7 +2615,7 @@ def railways_to_ifc(
         return []
     
     # Pre-create railway types
-    print(f"    Creating railway types...")
+    print("    Creating railway types...")
     gauges_used = set()
     for railway in railways:
         gauge_str = railway.gauge

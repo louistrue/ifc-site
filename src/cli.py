@@ -132,7 +132,8 @@ Examples:
         args.include_water = True
         args.include_buildings = True
         args.include_railways = True
-        # Note: bridges excluded from --all, use --include-bridges explicitly if needed
+        # Note: bridges excluded from --all due to experimental status and potential performance impact.
+        # Use --include-bridges explicitly if needed.
     
     # Build features list
     features = []
