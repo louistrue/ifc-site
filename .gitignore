@@ -12,3 +12,15 @@ build/
 .idea/
 *.swp
 *.swo
+
+# IFC files (except showcase)
+*.ifc
+!*showcase*.ifc
+
+# Texture files
+*.jpg
+
+# GLB files (except showcase)
+*.glb
+!*showcase*.glb
+

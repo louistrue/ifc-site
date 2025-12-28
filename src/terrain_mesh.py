@@ -305,6 +305,112 @@ def apply_road_recesses_to_terrain(roads, terrain_coords=None, terrain_elevation
     return combined_roads, edge_coords, edge_elevations
 
 
+def apply_railway_recesses_to_terrain(railways, terrain_coords=None, terrain_elevations=None, fetch_elevations_func=None):
+    """
+    Create railway ballast bed polygons and sample edge points for terrain mesh integration.
+    Railway beds are wider than the track gauge to accommodate ballast.
+
+    Args:
+        railways: List of RailwayFeature objects
+        terrain_coords: Existing terrain coordinates for interpolation
+        terrain_elevations: Existing terrain elevations for interpolation
+        fetch_elevations_func: Fallback function to fetch elevations
+
+    Returns:
+        railway_polygons: Combined railway polygon for terrain cutout
+        railway_edge_coords: List of (x, y) coordinates along railway edges
+        railway_edge_elevations: List of elevations for railway edge points
+    """
+    from shapely.ops import unary_union
+    from scipy.interpolate import LinearNDInterpolator
+    
+    BALLAST_BED_WIDTH = 3.2  # meters - width of ballast bed
+    EDGE_SAMPLE_INTERVAL = 3.0  # Sample every 3m along edges
+    
+    if not railways:
+        return None, [], []
+    
+    # Create buffered polygons for all railways
+    railway_polygons = []
+    
+    for railway in railways:
+        if railway.geometry is None or railway.geometry.is_empty:
+            continue
+        
+        half_width = BALLAST_BED_WIDTH / 2.0
+        
+        try:
+            # Use flat caps for railway ends (cap_style=2)
+            railway_poly = railway.geometry.buffer(half_width, cap_style=2, join_style=2, resolution=4)
+            if railway_poly.is_valid and not railway_poly.is_empty:
+                railway_polygons.append(railway_poly)
+        except Exception as e:
+            logger.warning(f"Could not buffer railway {railway.id}: {e}")
+            continue
+    
+    if not railway_polygons:
+        return None, [], []
+    
+    # Merge all railway polygons
+    try:
+        combined_railways = unary_union(railway_polygons)
+        combined_railways = combined_railways.simplify(0.5, preserve_topology=True)
+    except Exception as e:
+        logger.warning(f"Could not merge railway polygons: {e}")
+        return None, [], []
+    
+    print(f"  Created railway cutout from {len(railway_polygons)} railway segments")
+    print(f"  Railway bed area: {combined_railways.area:.1f} m²")
+    
+    # Sample edge points from the merged polygon
+    edge_coords = []
+    if combined_railways.geom_type == 'Polygon':
+        exterior = combined_railways.exterior
+        for dist in np.arange(0, exterior.length, EDGE_SAMPLE_INTERVAL):
+            pt = exterior.interpolate(dist)
+            edge_coords.append((pt.x, pt.y))
+    elif combined_railways.geom_type == 'MultiPolygon':
+        for poly in combined_railways.geoms:
+            exterior = poly.exterior
+            for dist in np.arange(0, exterior.length, EDGE_SAMPLE_INTERVAL):
+                pt = exterior.interpolate(dist)
+                edge_coords.append((pt.x, pt.y))
+    
+    print(f"  Sampled {len(edge_coords)} railway edge points")
+    
+    # Get elevations for edge points
+    edge_elevations = []
+    if edge_coords:
+        if terrain_coords is not None and terrain_elevations is not None and len(terrain_coords) > 0:
+            print("  Interpolating elevations from terrain data...")
+            try:
+                terrain_points = np.array(terrain_coords)
+                terrain_z = np.array(terrain_elevations)
+                interpolator = LinearNDInterpolator(terrain_points, terrain_z)
+                
+                edge_points = np.array(edge_coords)
+                edge_elevations = interpolator(edge_points)
+                
+                # Handle NaN values
+                nan_mask = np.isnan(edge_elevations)
+                if np.any(nan_mask):
+                    from scipy.interpolate import NearestNDInterpolator
+                    nearest = NearestNDInterpolator(terrain_points, terrain_z)
+                    edge_elevations[nan_mask] = nearest(edge_points[nan_mask])
+                
+                edge_elevations = edge_elevations.tolist()
+                print(f"  Interpolated {len(edge_elevations)} elevations")
+            except Exception as e:
+                logger.warning(f"Interpolation failed, falling back to API: {e}")
+                if fetch_elevations_func:
+                    edge_elevations = fetch_elevations_func(edge_coords)
+        elif fetch_elevations_func:
+            print(f"  Fetching elevations via API ({len(edge_coords)} calls)...")
+            edge_elevations = fetch_elevations_func(edge_coords)
+    
+    return combined_railways, edge_coords, edge_elevations
+
+
 def triangulate_terrain_with_cutout(
     coords: List[Tuple[float, float]], 
     elevations: List[float], 
@@ -316,10 +422,13 @@ def triangulate_terrain_with_cutout(
     road_edge_elevations: Optional[List[float]] = None,
     water_polygons=None,
     water_edge_coords: Optional[List[Tuple[float, float]]] = None,
-    water_edge_elevations: Optional[List[float]] = None
+    water_edge_elevations: Optional[List[float]] = None,
+    railway_polygons=None,
+    railway_edge_coords: Optional[List[Tuple[float, float]]] = None,
+    railway_edge_elevations: Optional[List[float]] = None
 ) -> List[List[Tuple[float, float, float]]]:
     """
-    Create triangulated terrain mesh with clean cutouts for site, roads, and water.
+    Create triangulated terrain mesh with clean cutouts for site, roads, water, and railways.
     Uses mapbox-earcut for proper polygon triangulation that respects holes.
     
     Args:
@@ -387,6 +496,17 @@ def triangulate_terrain_with_cutout(
         except Exception as e:
             logger.warning(f"Could not subtract water: {e}")
     
+    # Subtract railway polygons (ballast bed cutouts)
+    if railway_polygons is not None and not railway_polygons.is_empty:
+        try:
+            clipped_railways = railway_polygons.intersection(terrain_boundary)
+            if not clipped_railways.is_empty:
+                simplified_railways = clipped_railways.simplify(0.5, preserve_topology=True)
+                terrain_poly = terrain_poly.difference(simplified_railways)
+                print("  Subtracted railway bed areas")
+        except Exception as e:
+            logger.warning(f"Could not subtract railways: {e}")
+    
     # Handle result - could be Polygon, MultiPolygon, or GeometryCollection
     all_polygons = []
     if terrain_poly.geom_type == 'Polygon':
@@ -424,7 +544,8 @@ def triangulate_terrain_with_cutout(
             exterior = poly.exterior
             # Densify the exterior to add more vertices for terrain detail
             densified_exterior = _densify_ring(exterior, max_segment_length=15.0)
-            exterior_coords = np.array(densified_exterior.coords)[:-1]  # Remove closing point
+            # Force 2D coordinates for earcut (some sources have 3D coords)
+            exterior_coords = np.array([(c[0], c[1]) for c in densified_exterior.coords])[:-1]
             
             # Collect all rings: exterior + holes
             all_ring_coords = [exterior_coords]
@@ -433,7 +554,8 @@ def triangulate_terrain_with_cutout(
             # Add interior rings (holes within this polygon)
             for interior in poly.interiors:
                 densified_interior = _densify_ring(interior, max_segment_length=5.0)
-                hole_coords = np.array(densified_interior.coords)[:-1]
+                # Force 2D coordinates
+                hole_coords = np.array([(c[0], c[1]) for c in densified_interior.coords])[:-1]
                 if len(hole_coords) >= 3:
                     all_ring_coords.append(hole_coords)
                     ring_ends.append(ring_ends[-1] + len(hole_coords))
@@ -479,7 +601,8 @@ def _densify_ring(ring, max_segment_length: float = 10.0):
     for i in range(len(coords) - 1):
         p1 = coords[i]
         p2 = coords[i + 1]
-        new_coords.append(p1)
+        # Force 2D coordinates
+        new_coords.append((p1[0], p1[1]))
         
         # Calculate distance
         dx = p2[0] - p1[0]
@@ -496,8 +619,8 @@ def _densify_ring(ring, max_segment_length: float = 10.0):
                     p1[1] + t * dy
                 ))
     
-    # Add closing point
-    new_coords.append(coords[-1])
+    # Add closing point (force 2D)
+    new_coords.append((coords[-1][0], coords[-1][1]))
     
     return LineString(new_coords)
 
