@@ -8,8 +8,11 @@ Convert Swiss cadastral parcels into comprehensive 3D IFC (Industry Foundation C
 - **3D terrain generation** - Circular terrain mesh with precise site cutout
 - **Building footprints & 3D models** - Load buildings from Swiss APIs (CityGML, Vector 25k)
 - **Road network data** - Load Swiss road and transportation network from swissTLM3D
+- **Railway & train tracks** - Load railway data from OpenStreetMap (rail, tram, metro, funicular)
 - **Vegetation & forest data** - Load trees, forests, and vegetation from swissTLM3D
 - **Complete BIM models** - Site + terrain + buildings + roads + vegetation in georeferenced IFC
+- **Satellite imagery textures** - Optional SWISSIMAGE orthophoto textures for terrain and buildings
+- **glTF/GLB export** - Web-ready 3D models with textures for Three.js visualization
 - **IFC4 compliance** - Proper georeferencing (EPSG:2056), property sets, and schema compliance
 - **FastAPI service** - RESTful API for terrain and building generation
 - **Multiple workflows** - Choose terrain-only, site-only, or complete models
@@ -32,7 +35,22 @@ pip install -r requirements.txt
 
 ### Generate a Complete Site Model
 
-Create terrain, site boundary, and buildings in one command:
+**Using the unified CLI (recommended):**
+
+```bash
+python src/cli.py \
+  --address "Bundesplatz 3, 3003 Bern" \
+  --all \
+  --include-satellite-overlay \
+  --output complete_site.ifc
+```
+
+This generates:
+- Georeferenced IFC file with terrain, site boundary, buildings, roads, water, and vegetation
+- GLB file with satellite imagery textures for web visualization
+- Satellite imagery automatically fetched and mapped
+
+**Using legacy scripts:**
 
 ```bash
 python -m src.terrain_with_buildings \
@@ -245,6 +263,246 @@ Swiss roads are classified into categories:
 - **Privatstrasse** - Private road
 - **Weg** - Path/Track
 - **Fussweg** - Footpath
+
+## Satellite Imagery and Textures
+
+### SWISSIMAGE Orthophoto Integration
+
+The tool supports optional satellite imagery textures from Swiss SWISSIMAGE orthophoto data (geo.admin.ch). When enabled, textures are applied to terrain and optionally to buildings for realistic visualization.
+
+### Features
+
+- **Terrain textures** - Satellite imagery automatically mapped to terrain mesh
+- **Building textures** - Optional satellite imagery textures on building roofs and walls
+- **glTF/GLB export** - Web-ready 3D models with embedded textures for Three.js
+- **IFC textures** - Texture mapping in IFC files for BIM viewers
+- **Historical imagery** - Support for historical imagery by year
+- **Configurable resolution** - Control imagery resolution (0.25m to 2.0m per pixel)
+
+### CLI Usage
+
+**Basic usage with satellite imagery:**
+
+```bash
+python src/cli.py \
+  --address "Paradeplatz, 8001 Zürich" \
+  --include-satellite-overlay \
+  --include-buildings \
+  --output site_with_textures.ifc
+```
+
+This generates:
+- IFC file with terrain textures
+- GLB file (glTF) with textures for web visualization
+- Satellite imagery automatically fetched and mapped
+
+**With building textures (default):**
+
+```bash
+python src/cli.py \
+  --address "Paradeplatz, 8001 Zürich" \
+  --include-satellite-overlay \
+  --include-buildings \
+  --apply-texture-to-buildings \
+  --output site.ifc
+```
+
+**Terrain textures only (buildings use default color):**
+
+```bash
+python src/cli.py \
+  --address "Paradeplatz, 8001 Zürich" \
+  --include-satellite-overlay \
+  --include-buildings \
+  --no-texture-buildings \
+  --output site.ifc
+```
+
+**High-resolution imagery:**
+
+```bash
+python src/cli.py \
+  --address "Paradeplatz, 8001 Zürich" \
+  --include-satellite-overlay \
+  --imagery-resolution 0.25 \
+  --output detailed.ifc
+```
+
+**Historical imagery:**
+
+```bash
+python src/cli.py \
+  --address "Paradeplatz, 8001 Zürich" \
+  --include-satellite-overlay \
+  --imagery-year 2020 \
+  --output historical.ifc
+```
+
+### Key Options
+
+- `--include-satellite-overlay` - Enable satellite imagery textures
+- `--apply-texture-to-buildings` - Apply textures to buildings (default: enabled when imagery enabled)
+- `--no-texture-buildings` - Use default color for buildings instead of satellite textures
+- `--imagery-resolution` - Resolution in meters per pixel (default: 0.5m)
+- `--imagery-year` - Year for historical imagery (e.g., "2020"), default: current
+- `--export-gltf` - Export glTF/GLB file (default: auto-enabled when imagery enabled)
+- `--no-export-gltf` - Disable glTF export even when imagery is enabled
+- `--embed-imagery` - Embed imagery in IFC (default: True)
+- `--no-embed-imagery` - Use external URL references for imagery
+
+### Building Texture Behavior
+
+When satellite imagery is enabled:
+- **Terrain** always gets satellite textures
+- **Buildings** can optionally get satellite textures or use default beige color
+- Buildings are **always included** in the 3D model regardless of texture setting
+- The `--no-texture-buildings` flag only controls coloring, not geometry inclusion
+
+### glTF/GLB Export
+
+When satellite imagery is enabled, the tool automatically exports a GLB file alongside the IFC:
+- Same name as IFC file but with `.glb` extension
+- Includes terrain, roads, water, railways, and buildings
+- Textures embedded in GLB for easy web deployment
+- Compatible with Three.js and other web 3D viewers
+
+**Example output:**
+```
+site.ifc          # IFC file with textures
+site.glb          # glTF/GLB file with textures
+site_texture.jpg  # Satellite imagery texture file
+```
+
+### Programmatic Usage
+
+```python
+from src.site_model import run_combined_terrain_workflow
+
+# With building textures (default)
+result = run_combined_terrain_workflow(
+    address="Paradeplatz, 8001 Zürich",
+    radius=500,
+    include_satellite_overlay=True,
+    include_buildings=True,
+    apply_texture_to_buildings=True,  # Buildings get satellite textures
+    imagery_resolution=0.5,
+    export_gltf=True,
+    output_path="site.ifc"
+)
+
+# Without building textures
+result = run_combined_terrain_workflow(
+    address="Paradeplatz, 8001 Zürich",
+    radius=500,
+    include_satellite_overlay=True,
+    include_buildings=True,
+    apply_texture_to_buildings=False,  # Buildings use default color
+    imagery_resolution=0.5,
+    export_gltf=True,
+    output_path="site.ifc"
+)
+```
+
+### Texture Mapping Details
+
+- **UV coordinates** - Automatically calculated based on imagery bounding box
+- **Coordinate system** - EPSG:2056 (Swiss LV95) for both geometry and imagery
+- **Terrain mapping** - Full terrain mesh gets UV coordinates mapped to imagery bounds
+- **Building mapping** - Each building face gets UV coordinates based on its world position
+- **Image format** - JPEG format from geo.admin.ch WMS service
+
+### Performance Considerations
+
+- **Imagery download** - ~1-5 seconds depending on area size and resolution
+- **Texture processing** - Minimal overhead for UV coordinate calculation
+- **GLB file size** - Increases with imagery resolution (0.25m = larger files)
+- **Recommendation** - Use 0.5m resolution for good quality/size balance
+
+## Railway and Train Data
+
+### Railway Data Sources
+
+The tool supports railway and train track data from OpenStreetMap:
+
+1. **OpenStreetMap Railways** - Complete railway network
+   - Best for: Train tracks, tram lines, metro, funicular
+   - Source: OpenStreetMap Overpass API
+   - Format: Line geometry with classification and attributes
+   - Coverage: Worldwide (including Switzerland)
+
+### Railway Types
+
+Swiss railways include various track types:
+- **rail** - Standard railway tracks (SBB, regional trains)
+- **tram** - Tram/streetcar lines
+- **light_rail** - Light rail systems
+- **subway** - Metro/underground lines
+- **narrow_gauge** - Narrow gauge railways (mountain railways)
+- **funicular** - Funicular railways
+
+### CLI Usage
+
+**Include railways in site model:**
+
+```bash
+python src/cli.py \
+  --address "Zürich HB, Zürich" \
+  --include-railways \
+  --include-buildings \
+  --output station_area.ifc
+```
+
+**All features including railways:**
+
+```bash
+python src/cli.py \
+  --address "Bern Hauptbahnhof" \
+  --all \
+  --output complete.ifc
+```
+
+Note: `--all` includes railways by default.
+
+### Railway Loader API
+
+Load railways programmatically:
+
+```python
+from src.loaders.railway import SwissRailwayLoader, RailwayFeature
+
+# Load railways in a bounding box
+loader = SwissRailwayLoader()
+bbox = (2682500, 1247500, 2683000, 1248000)  # EPSG:2056
+railways = loader.get_railways_in_bbox(bbox)
+
+for railway in railways:
+    print(f"Railway {railway.id}:")
+    print(f"  Type: {railway.railway_type}")
+    print(f"  Name: {railway.name or 'Unnamed'}")
+    print(f"  Electrified: {railway.electrified}")
+    print(f"  Gauge: {railway.gauge}mm" if railway.gauge else "")
+    print(f"  Tracks: {railway.tracks}")
+```
+
+### Railway Attributes
+
+Each railway feature includes:
+- `id` - Unique identifier
+- `geometry` - LineString geometry (EPSG:2056)
+- `railway_type` - Type classification (rail, tram, etc.)
+- `name` - Railway line name (if available)
+- `electrified` - Electrification type (contact_line, rail, yes, no)
+- `gauge` - Track gauge in mm (e.g., 1435 standard, 1000 meter gauge)
+- `tracks` - Number of tracks
+- `service` - Service type (main, branch, spur, yard, siding)
+- `usage` - Usage type (main, branch, industrial, tourism)
+
+### Performance Notes
+
+- Railway data is fetched from OpenStreetMap Overpass API
+- Rate limiting is applied to prevent API overload
+- Data is converted from WGS84 to EPSG:2056 automatically
+- Railways are clipped to the specified radius
 
 ## Vegetation and Forest Data
 
@@ -527,12 +785,14 @@ python --version
 
 - **Cadastral boundaries:** geo.admin.ch REST API
 - **Elevation data:** Swiss height API (LN02)
+- **Satellite imagery:** SWISSIMAGE orthophoto (WMS service)
 - **Buildings (Vector 25k):** swisstopo topographic maps
 - **Buildings (3D):** Swiss Buildings 3D STAC API
 - **CityGML:** LOD2 building models with complete geometry
 - **Roads (swissTLM3D):** Swiss Topographic Landscape Model road network
 - **Roads (Vector 25k):** Topographic road representation
 - **Roads (Main network):** ASTRA main roads network
+- **Railways (OpenStreetMap):** Railway tracks, tram lines, metro, funicular
 - **Vegetation (swissTLM3D):** Forest polygons and vegetation areas
 - **Vegetation (3D):** 3D vegetation objects and individual trees
 - **Vegetation Health:** SwissEO satellite-based vegetation monitoring
@@ -541,13 +801,16 @@ python --version
 
 - Cadastral: `https://api3.geo.admin.ch/rest/services/api/MapServer/identify`
 - Height: `https://api3.geo.admin.ch/rest/services/height`
+- Satellite Imagery: `https://wms.geo.admin.ch` (WMS GetMap)
 - Buildings REST: `https://api3.geo.admin.ch/rest/services/api/MapServer/identify`
 - Buildings STAC: `https://data.geo.admin.ch/api/stac/v1`
 - Roads: `https://api3.geo.admin.ch/rest/services/api/MapServer/identify`
+- Railways: `https://overpass-api.de/api/interpreter` (OpenStreetMap)
 - Vegetation: `https://api3.geo.admin.ch/rest/services/api/MapServer/identify`
 
 ### Available Layers
 
+- `ch.swisstopo.swissimage` - SWISSIMAGE orthophoto (WMS)
 - `ch.swisstopo.swissbuildings3d_3_0` - 3D building models (STAC)
 - `ch.swisstopo.vec25-gebaeude` - Building footprints (REST)
 - `ch.swisstopo.swisstlm3d-strassen` - Complete road network (REST)
@@ -556,6 +819,7 @@ python --version
 - `ch.swisstopo.swisstlm3d-wald` - Forest areas (REST)
 - `ch.swisstopo.vegetation.3d` - 3D vegetation objects (3D Tiles)
 - `ch.swisstopo.swisseo_vhi_v100` - Vegetation Health Index (Raster)
+- OpenStreetMap `railway=*` - Railway tracks (via Overpass API)
 
 ## Docker Deployment
 
@@ -585,8 +849,13 @@ Generated IFC files contain:
 - Georeferenced site boundaries (EPSG:2056)
 - 3D terrain geometry (surface mesh with cutout)
 - 3D building models (complete LOD2 solids)
+- Optional satellite imagery textures (SWISSIMAGE orthophoto)
 - Comprehensive metadata (cadastral, building attributes)
 - IFC4 compliance for major viewers (BlenderBIM, Solibri, etc.)
+
+When satellite imagery is enabled, additional files are generated:
+- GLB file (glTF) with textures for web visualization
+- Texture image file (JPEG) with satellite imagery
 
 ## References
 

@@ -2482,51 +2482,55 @@ def railway_to_ifc(
         perp_y = dir_x
         
         # Place sleepers along this segment
-        distance_along = 0.0
-        while cumulative_distance + distance_along < cumulative_distance + segment_length:
-            # Position for this sleeper
-            t = distance_along / segment_length if segment_length > 0 else 0
-            sx = x1 + dx * t
-            sy = y1 + dy * t
-            sz = z1 + dz * t
-            
-            # Sleeper geometry (rectangular box perpendicular to track)
-            half_sleeper_len = SLEEPER_LENGTH / 2.0
-            half_sleeper_w = SLEEPER_WIDTH / 2.0
-            # Sleepers sit on top of ballast (bottom at ballast top level)
-            sleeper_z = sz + BALLAST_TOP_OFFSET  # Sleeper bottom is at ballast top
-            
-            # Sleeper corners (along track direction x perpendicular direction)
-            s1 = (sx - dir_x * half_sleeper_w + perp_x * half_sleeper_len,
-                  sy - dir_y * half_sleeper_w + perp_y * half_sleeper_len,
-                  sleeper_z)
-            s2 = (sx + dir_x * half_sleeper_w + perp_x * half_sleeper_len,
-                  sy + dir_y * half_sleeper_w + perp_y * half_sleeper_len,
-                  sleeper_z)
-            s3 = (sx + dir_x * half_sleeper_w - perp_x * half_sleeper_len,
-                  sy + dir_y * half_sleeper_w - perp_y * half_sleeper_len,
-                  sleeper_z)
-            s4 = (sx - dir_x * half_sleeper_w - perp_x * half_sleeper_len,
-                  sy - dir_y * half_sleeper_w - perp_y * half_sleeper_len,
-                  sleeper_z)
-            
-            # Top corners
-            st1 = (s1[0], s1[1], s1[2] + SLEEPER_HEIGHT)
-            st2 = (s2[0], s2[1], s2[2] + SLEEPER_HEIGHT)
-            st3 = (s3[0], s3[1], s3[2] + SLEEPER_HEIGHT)
-            st4 = (s4[0], s4[1], s4[2] + SLEEPER_HEIGHT)
-            
-            # Sleeper faces
-            all_faces.append([s1, s2, s3, s4])  # Bottom
-            all_faces.append([st4, st3, st2, st1])  # Top
-            all_faces.append([s1, s4, st4, st1])  # Side 1
-            all_faces.append([s2, s1, st1, st2])  # Side 2
-            all_faces.append([s3, s2, st2, st3])  # Side 3
-            all_faces.append([s4, s3, st3, st4])  # Side 4
-            
-            distance_along += SLEEPER_SPACING
-            if distance_along >= segment_length:
-                break
+        # Guard against infinite loop if SLEEPER_SPACING is invalid
+        if SLEEPER_SPACING <= 0:
+            logger.warning(f"Invalid SLEEPER_SPACING ({SLEEPER_SPACING}), skipping sleeper placement")
+        else:
+            distance_along = 0.0
+            while distance_along < segment_length:
+                # Position for this sleeper
+                t = distance_along / segment_length if segment_length > 0 else 0
+                sx = x1 + dx * t
+                sy = y1 + dy * t
+                sz = z1 + dz * t
+                
+                # Sleeper geometry (rectangular box perpendicular to track)
+                half_sleeper_len = SLEEPER_LENGTH / 2.0
+                half_sleeper_w = SLEEPER_WIDTH / 2.0
+                # Sleepers sit on top of ballast (bottom at ballast top level)
+                sleeper_z = sz + BALLAST_TOP_OFFSET  # Sleeper bottom is at ballast top
+                
+                # Sleeper corners (along track direction x perpendicular direction)
+                s1 = (sx - dir_x * half_sleeper_w + perp_x * half_sleeper_len,
+                      sy - dir_y * half_sleeper_w + perp_y * half_sleeper_len,
+                      sleeper_z)
+                s2 = (sx + dir_x * half_sleeper_w + perp_x * half_sleeper_len,
+                      sy + dir_y * half_sleeper_w + perp_y * half_sleeper_len,
+                      sleeper_z)
+                s3 = (sx + dir_x * half_sleeper_w - perp_x * half_sleeper_len,
+                      sy + dir_y * half_sleeper_w - perp_y * half_sleeper_len,
+                      sleeper_z)
+                s4 = (sx - dir_x * half_sleeper_w - perp_x * half_sleeper_len,
+                      sy - dir_y * half_sleeper_w - perp_y * half_sleeper_len,
+                      sleeper_z)
+                
+                # Top corners
+                st1 = (s1[0], s1[1], s1[2] + SLEEPER_HEIGHT)
+                st2 = (s2[0], s2[1], s2[2] + SLEEPER_HEIGHT)
+                st3 = (s3[0], s3[1], s3[2] + SLEEPER_HEIGHT)
+                st4 = (s4[0], s4[1], s4[2] + SLEEPER_HEIGHT)
+                
+                # Sleeper faces
+                all_faces.append([s1, s2, s3, s4])  # Bottom
+                all_faces.append([st4, st3, st2, st1])  # Top
+                all_faces.append([s1, s4, st4, st1])  # Side 1
+                all_faces.append([s2, s1, st1, st2])  # Side 2
+                all_faces.append([s3, s2, st2, st3])  # Side 3
+                all_faces.append([s4, s3, st3, st4])  # Side 4
+                
+                distance_along += SLEEPER_SPACING
+                if distance_along >= segment_length:
+                    break
         
         cumulative_distance += segment_length
     
@@ -2975,27 +2979,44 @@ def bridge_to_ifc(
             perp_x = -dy / length
             perp_y = dx / length
             
-            # Left barrier
-            barrier_top_1 = (x1 + perp_x * half_width - offset_x, y1 + perp_y * half_width - offset_y, z1 - offset_z + BRIDGE_BARRIER_HEIGHT)
-            barrier_top_2 = (x2 + perp_x * half_width - offset_x, y2 + perp_y * half_width - offset_y, z2 - offset_z + BRIDGE_BARRIER_HEIGHT)
-            barrier_bottom_1 = (x1 + perp_x * half_width - offset_x, y1 + perp_y * half_width - offset_y, z1 - offset_z)
-            barrier_bottom_2 = (x2 + perp_x * half_width - offset_x, y2 + perp_y * half_width - offset_y, z2 - offset_z)
-            
-            barrier_side_1 = (barrier_top_1[0] + perp_x * BRIDGE_BARRIER_WIDTH, barrier_top_1[1] + perp_y * BRIDGE_BARRIER_WIDTH, barrier_top_1[2])
-            barrier_side_2 = (barrier_top_2[0] + perp_x * BRIDGE_BARRIER_WIDTH, barrier_top_2[1] + perp_y * BRIDGE_BARRIER_WIDTH, barrier_top_2[2])
-            barrier_side_3 = (barrier_bottom_2[0] + perp_x * BRIDGE_BARRIER_WIDTH, barrier_bottom_2[1] + perp_y * BRIDGE_BARRIER_WIDTH, barrier_bottom_2[2])
-            barrier_side_4 = (barrier_bottom_1[0] + perp_x * BRIDGE_BARRIER_WIDTH, barrier_bottom_1[1] + perp_y * BRIDGE_BARRIER_WIDTH, barrier_bottom_1[2])
-            
             def make_barrier_face(pts):
                 points = [model.createIfcCartesianPoint([float(p[0]), float(p[1]), float(p[2])]) for p in pts]
                 poly_loop = model.createIfcPolyLoop(points)
                 return model.createIfcFace([model.createIfcFaceOuterBound(poly_loop, True)])
             
-            # Barrier faces
-            barrier_faces.append(make_barrier_face([barrier_top_1, barrier_top_2, barrier_side_2, barrier_side_1]))
-            barrier_faces.append(make_barrier_face([barrier_bottom_1, barrier_bottom_2, barrier_side_3, barrier_side_4]))
-            barrier_faces.append(make_barrier_face([barrier_top_1, barrier_bottom_1, barrier_side_4, barrier_side_1]))
-            barrier_faces.append(make_barrier_face([barrier_top_2, barrier_bottom_2, barrier_side_3, barrier_side_2]))
+            # Left barrier (positive perpendicular direction)
+            barrier_top_1_left = (x1 + perp_x * half_width - offset_x, y1 + perp_y * half_width - offset_y, z1 - offset_z + BRIDGE_BARRIER_HEIGHT)
+            barrier_top_2_left = (x2 + perp_x * half_width - offset_x, y2 + perp_y * half_width - offset_y, z2 - offset_z + BRIDGE_BARRIER_HEIGHT)
+            barrier_bottom_1_left = (x1 + perp_x * half_width - offset_x, y1 + perp_y * half_width - offset_y, z1 - offset_z)
+            barrier_bottom_2_left = (x2 + perp_x * half_width - offset_x, y2 + perp_y * half_width - offset_y, z2 - offset_z)
+            
+            barrier_side_1_left = (barrier_top_1_left[0] + perp_x * BRIDGE_BARRIER_WIDTH, barrier_top_1_left[1] + perp_y * BRIDGE_BARRIER_WIDTH, barrier_top_1_left[2])
+            barrier_side_2_left = (barrier_top_2_left[0] + perp_x * BRIDGE_BARRIER_WIDTH, barrier_top_2_left[1] + perp_y * BRIDGE_BARRIER_WIDTH, barrier_top_2_left[2])
+            barrier_side_3_left = (barrier_bottom_2_left[0] + perp_x * BRIDGE_BARRIER_WIDTH, barrier_bottom_2_left[1] + perp_y * BRIDGE_BARRIER_WIDTH, barrier_bottom_2_left[2])
+            barrier_side_4_left = (barrier_bottom_1_left[0] + perp_x * BRIDGE_BARRIER_WIDTH, barrier_bottom_1_left[1] + perp_y * BRIDGE_BARRIER_WIDTH, barrier_bottom_1_left[2])
+            
+            # Left barrier faces
+            barrier_faces.append(make_barrier_face([barrier_top_1_left, barrier_top_2_left, barrier_side_2_left, barrier_side_1_left]))
+            barrier_faces.append(make_barrier_face([barrier_bottom_1_left, barrier_bottom_2_left, barrier_side_3_left, barrier_side_4_left]))
+            barrier_faces.append(make_barrier_face([barrier_top_1_left, barrier_bottom_1_left, barrier_side_4_left, barrier_side_1_left]))
+            barrier_faces.append(make_barrier_face([barrier_top_2_left, barrier_bottom_2_left, barrier_side_3_left, barrier_side_2_left]))
+            
+            # Right barrier (negative perpendicular direction)
+            barrier_top_1_right = (x1 - perp_x * half_width - offset_x, y1 - perp_y * half_width - offset_y, z1 - offset_z + BRIDGE_BARRIER_HEIGHT)
+            barrier_top_2_right = (x2 - perp_x * half_width - offset_x, y2 - perp_y * half_width - offset_y, z2 - offset_z + BRIDGE_BARRIER_HEIGHT)
+            barrier_bottom_1_right = (x1 - perp_x * half_width - offset_x, y1 - perp_y * half_width - offset_y, z1 - offset_z)
+            barrier_bottom_2_right = (x2 - perp_x * half_width - offset_x, y2 - perp_y * half_width - offset_y, z2 - offset_z)
+            
+            barrier_side_1_right = (barrier_top_1_right[0] - perp_x * BRIDGE_BARRIER_WIDTH, barrier_top_1_right[1] - perp_y * BRIDGE_BARRIER_WIDTH, barrier_top_1_right[2])
+            barrier_side_2_right = (barrier_top_2_right[0] - perp_x * BRIDGE_BARRIER_WIDTH, barrier_top_2_right[1] - perp_y * BRIDGE_BARRIER_WIDTH, barrier_top_2_right[2])
+            barrier_side_3_right = (barrier_bottom_2_right[0] - perp_x * BRIDGE_BARRIER_WIDTH, barrier_bottom_2_right[1] - perp_y * BRIDGE_BARRIER_WIDTH, barrier_bottom_2_right[2])
+            barrier_side_4_right = (barrier_bottom_1_right[0] - perp_x * BRIDGE_BARRIER_WIDTH, barrier_bottom_1_right[1] - perp_y * BRIDGE_BARRIER_WIDTH, barrier_bottom_1_right[2])
+            
+            # Right barrier faces
+            barrier_faces.append(make_barrier_face([barrier_top_1_right, barrier_top_2_right, barrier_side_2_right, barrier_side_1_right]))
+            barrier_faces.append(make_barrier_face([barrier_bottom_1_right, barrier_bottom_2_right, barrier_side_3_right, barrier_side_4_right]))
+            barrier_faces.append(make_barrier_face([barrier_top_1_right, barrier_bottom_1_right, barrier_side_4_right, barrier_side_1_right]))
+            barrier_faces.append(make_barrier_face([barrier_top_2_right, barrier_bottom_2_right, barrier_side_3_right, barrier_side_2_right]))
         
         if barrier_faces:
             try:

@@ -6,10 +6,11 @@ Test script to generate IFC file with satellite imagery and glTF export
 import logging
 import sys
 import os
-from src.site_model import run_combined_terrain_workflow
 
 # Add src directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.site_model import run_combined_terrain_workflow
 
 # Configure logging
 logging.basicConfig(

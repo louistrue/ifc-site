@@ -316,7 +316,10 @@ def create_building_meshes(
         width = maxx - minx
         height = maxy - miny
         if width <= 0 or height <= 0:
+            logger.warning(f"Invalid imagery_bbox: {imagery_bbox}, disabling UV mapping")
             has_uv = False
+        else:
+            logger.debug(f"UV mapping enabled with bbox: {imagery_bbox}, size: {width}x{height}m")
     
     meshes = []
     
@@ -335,14 +338,24 @@ def create_building_meshes(
             remaining = (total - idx) / rate if rate > 0 else 0
             logger.debug(f"Building meshes: {idx}/{total} ({elapsed:.1f}s, ~{remaining:.1f}s remaining)")
         if not hasattr(building, 'faces') or not building.faces:
+            logger.debug(f"Building {getattr(building, 'id', 'unknown')} has no faces attribute")
             continue
         
+        # Ensure we have faces to process
+        if len(building.faces) == 0:
+            logger.debug(f"Building {getattr(building, 'id', 'unknown')} has empty faces list")
+            continue
+        
+        # Debug: Log building info
+        if idx < 3:  # Log first 3 buildings for debugging
+            logger.debug(f"Building {idx}: {getattr(building, 'id', 'unknown')}, {len(building.faces)} faces, has_uv={has_uv}")
+        
         try:
-            # Pre-allocate arrays for better performance
-            all_vertices = []
+            # Build vertex map to deduplicate vertices
+            vertex_map = {}  # (x, y, z) -> vertex_index
+            vertices_list = []
+            uvs_list = [] if has_uv else None
             all_faces = []
-            all_uvs = [] if has_uv else None
-            vertex_offset = 0
             
             for face in building.faces:
                 if len(face) < 3:
@@ -362,41 +375,68 @@ def create_building_meshes(
                 local_y = world_y - offset_y
                 local_z = world_z - offset_z
                 
-                # Stack into vertices
-                face_vertices = np.column_stack([local_x, local_y, local_z])
-                all_vertices.append(face_vertices)
-                
                 # Calculate UVs if needed (vectorized)
+                face_uvs = None
                 if has_uv:
                     u = (world_x - minx) / width
                     v = (world_y - miny) / height
-                    face_uv = np.column_stack([u, v])
-                    if all_uvs is None:
-                        all_uvs = []
-                    all_uvs.append(face_uv)
+                    face_uvs = np.column_stack([u, v])
+                
+                # Map face vertices to unique vertex indices
+                face_indices = []
+                for i in range(n_pts):
+                    # Create vertex key (rounded for deduplication)
+                    vertex_key = (
+                        round(float(local_x[i]), 6),
+                        round(float(local_y[i]), 6),
+                        round(float(local_z[i]), 6)
+                    )
+                    
+                    if vertex_key not in vertex_map:
+                        # New vertex - add to map
+                        vertex_idx = len(vertices_list)
+                        vertex_map[vertex_key] = vertex_idx
+                        vertices_list.append([local_x[i], local_y[i], local_z[i]])
+                        if has_uv and face_uvs is not None:
+                            if uvs_list is None:
+                                uvs_list = []
+                            uvs_list.append([face_uvs[i, 0], face_uvs[i, 1]])
+                    else:
+                        # Existing vertex - reuse index
+                        vertex_idx = vertex_map[vertex_key]
+                    
+                    face_indices.append(vertex_idx)
                 
                 # Triangulate the face (fan triangulation)
                 for i in range(1, n_pts - 1):
                     all_faces.append([
-                        vertex_offset,
-                        vertex_offset + i,
-                        vertex_offset + i + 1
+                        face_indices[0],
+                        face_indices[i],
+                        face_indices[i + 1]
                     ])
-                
-                vertex_offset += n_pts
             
-            if all_vertices and all_faces:
-                # Concatenate all vertices at once
-                vertices = np.vstack(all_vertices).astype(np.float32)
+            if vertices_list and all_faces:
+                # Convert to numpy arrays
+                vertices = np.array(vertices_list, dtype=np.float32)
                 faces = np.array(all_faces, dtype=np.uint32)
                 
                 mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
                 
                 # Apply UV coordinates if available
-                if has_uv and all_uvs:
-                    mesh.visual.uv = np.vstack(all_uvs).astype(np.float32)
+                if has_uv and uvs_list and len(uvs_list) > 0:
+                    uv_array = np.array(uvs_list, dtype=np.float32)
+                    if len(uv_array) == len(vertices):
+                        mesh.visual.uv = uv_array
+                        # Texture material will be applied in export_gltf
+                    else:
+                        logger.warning(f"Building {getattr(building, 'id', 'unknown')}: UV count {len(uv_array)} != vertex count {len(vertices)}, skipping UV")
+                        mesh.visual.face_colors = [200, 190, 170, 255]  # RGBA
+                elif has_uv:
+                    # has_uv is True but no UVs were calculated
+                    logger.debug(f"Building {getattr(building, 'id', 'unknown')}: has_uv=True but uvs_list is empty (faces={len(building.faces)})")
+                    mesh.visual.face_colors = [200, 190, 170, 255]  # RGBA
                 else:
-                    # Fallback to color if no UV
+                    # No UV mapping requested
                     mesh.visual.face_colors = [200, 190, 170, 255]  # RGBA
                 
                 meshes.append(mesh)

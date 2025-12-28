@@ -46,6 +46,7 @@ def run_combined_terrain_workflow(
     imagery_resolution=0.5,
     imagery_year=None,
     export_gltf=None,  # None = auto (True if imagery enabled), False = disabled
+    apply_texture_to_buildings=None,  # None = auto (True if imagery enabled), False = disabled
 ):
     """
     Run the combined terrain generation workflow.
@@ -632,6 +633,11 @@ def run_combined_terrain_workflow(
         imagery_data=imagery_data, embed_imagery=embed_imagery
     )
     
+    # Determine if building textures should be applied
+    if apply_texture_to_buildings is None:
+        # Auto: enable if imagery is enabled
+        apply_texture_to_buildings = include_satellite_overlay and imagery_data is not None
+    
     # Export glTF if requested (default: auto-enable when imagery is enabled)
     should_export_gltf = export_gltf if export_gltf is not None else include_satellite_overlay
     if should_export_gltf and imagery_data:
@@ -654,7 +660,19 @@ def run_combined_terrain_workflow(
             image_bytes, imagery_bbox = imagery_data
             
             # Get offsets from result
-            offset_x, offset_y, offset_z = result[:3] if isinstance(result, tuple) else (center_x, center_y, 0.0)
+            # result is either (offset_x, offset_y, offset_z) when return_model=False
+            # or (model, offset_x, offset_y, offset_z) when return_model=True
+            if isinstance(result, tuple):
+                if len(result) == 4:
+                    # return_model=True: (model, offset_x, offset_y, offset_z)
+                    _, offset_x, offset_y, offset_z = result
+                elif len(result) == 3:
+                    # return_model=False: (offset_x, offset_y, offset_z)
+                    offset_x, offset_y, offset_z = result
+                else:
+                    offset_x, offset_y, offset_z = center_x, center_y, 0.0
+            else:
+                offset_x, offset_y, offset_z = center_x, center_y, 0.0
             
             # Create terrain mesh with UV mapping
             terrain_mesh = None
@@ -693,14 +711,17 @@ def run_combined_terrain_workflow(
                 if railway_mesh_list:
                     print(f"  Created {len(railway_mesh_list)} railway meshes")
             
-            # Add building meshes (with UV mapping for satellite imagery)
+            # Add building meshes (always included, with optional satellite texture mapping)
             if buildings:
-                print(f"  Creating {len(buildings)} building meshes with UV mapping...")
+                if apply_texture_to_buildings:
+                    print(f"  Creating {len(buildings)} building meshes with satellite textures...")
+                else:
+                    print(f"  Creating {len(buildings)} building meshes with default color...")
                 import time
                 start_time = time.time()
                 building_mesh_list = create_building_meshes(
                     buildings, offset_x, offset_y, offset_z,
-                    imagery_bbox=imagery_bbox  # Pass imagery bbox for UV mapping
+                    imagery_bbox=imagery_bbox if apply_texture_to_buildings else None  # Only pass bbox if textures enabled
                 )
                 elapsed = time.time() - start_time
                 other_meshes.extend(building_mesh_list)

@@ -43,6 +43,9 @@ Examples:
   
   # Historical imagery from 2020
   %(prog)s --address "Paradeplatz, Zürich" --include-satellite-overlay --imagery-year 2020 --output historical.ifc
+  
+  # Satellite imagery on terrain only (buildings use default color, not satellite textures)
+  %(prog)s --address "Paradeplatz, Zürich" --include-satellite-overlay --no-texture-buildings --output terrain_only.ifc
         """
     )
     
@@ -137,6 +140,10 @@ Examples:
                                help="Export glTF/GLB file alongside IFC (default: auto-enable when imagery enabled)")
     imagery_group.add_argument("--no-export-gltf", dest="export_gltf", action="store_false",
                                help="Disable glTF export even when imagery is enabled")
+    imagery_group.add_argument("--apply-texture-to-buildings", action="store_true", default=None,
+                               help="Apply satellite imagery textures to buildings (default: enabled when imagery is enabled)")
+    imagery_group.add_argument("--no-texture-buildings", dest="apply_texture_to_buildings", action="store_false",
+                               help="Use default color for buildings instead of satellite textures (buildings still included in 3D model)")
     
     # Convenience flag for all features
     parser.add_argument("--all", action="store_true",
@@ -188,6 +195,12 @@ Examples:
         print(f"  Imagery: {args.imagery_resolution}m resolution, {'embedded' if args.embed_imagery else 'external URLs'}", flush=True)
         if args.export_gltf is not False:  # Show if enabled or auto
             print(f"  glTF export: {'enabled' if args.export_gltf else 'auto (when imagery enabled)'}", flush=True)
+        # Show building texture status
+        if args.apply_texture_to_buildings is False:
+            print(f"  Building textures: disabled (using default color)", flush=True)
+        elif args.apply_texture_to_buildings is True:
+            print(f"  Building textures: enabled (satellite imagery)", flush=True)
+        # If None (auto), don't show - it's the default behavior
     print(f"  Output: {args.output}", flush=True)
     
     # If address provided, resolve it EARLY (before heavy imports)
@@ -243,6 +256,7 @@ Examples:
             imagery_resolution=args.imagery_resolution,
             imagery_year=args.imagery_year,
             export_gltf=args.export_gltf,
+            apply_texture_to_buildings=args.apply_texture_to_buildings,
         )
         
         # Print success message with file information

@@ -120,50 +120,6 @@ def create_texture_from_image(
     return texture
 
 
-def create_texture_map(
-    model: ifcopenshell.file,
-    texture: ifcopenshell.entity_instance,
-    vertices: List[Tuple[float, float, float]],
-    uv_coords: List[Tuple[float, float]]
-) -> ifcopenshell.entity_instance:
-    """
-    Create IfcTextureMap linking vertices to texture coordinates.
-    
-    Args:
-        model: IFC model
-        texture: IfcBlobTexture or IfcImageTexture
-        vertices: List of (x, y, z) vertex coordinates
-        uv_coords: List of (u, v) texture coordinates corresponding to vertices
-        
-    Returns:
-        IfcTextureMap entity
-    """
-    if len(vertices) != len(uv_coords):
-        raise ValueError(f"Vertex count ({len(vertices)}) != UV count ({len(uv_coords)})")
-    
-    # Create texture vertices (UV coordinates)
-    texture_vertices = []
-    for u, v in uv_coords:
-        # IFC uses IfcTextureVertex with S and T coordinates (0-1 range)
-        texture_vertex = model.createIfcTextureVertex([u, v])
-        texture_vertices.append(texture_vertex)
-    
-    # Create texture map
-    # IfcTextureMap maps texture coordinates to geometric vertices
-    # We need to create a mapping that associates each vertex with its UV coordinate
-    # For IFC, this is typically done via IfcTextureMap with MappedTo attribute
-    
-    # Create the texture map
-    # Note: The exact structure depends on how vertices are organized in faces
-    # For now, we'll create a basic texture map
-    texture_map = model.createIfcTextureMap(
-        MappedTo=None,  # Will be set when applied to specific face
-        Maps=[texture]
-    )
-    
-    return texture_map
-
-
 def apply_texture_to_element(
     model: ifcopenshell.file,
     element: ifcopenshell.entity_instance,
@@ -269,8 +225,7 @@ def apply_texture_to_faces(
     model: ifcopenshell.file,
     faces: List[ifcopenshell.entity_instance],
     texture: ifcopenshell.entity_instance,
-    vertex_to_uv: dict,
-    body_context: ifcopenshell.entity_instance
+    vertex_to_uv: dict
 ) -> bool:
     """
     Apply texture with UV mapping to specific faces.
@@ -282,17 +237,11 @@ def apply_texture_to_faces(
         faces: List of IfcFace entities
         texture: IfcBlobTexture or IfcImageTexture
         vertex_to_uv: Dictionary mapping vertex coordinates (x, y, z) to (u, v)
-        body_context: IFC representation context
         
     Returns:
         True if successful, False otherwise
     """
     try:
-        # Create surface style with texture
-        surface_style_rendering = model.createIfcSurfaceStyleRendering(
-            None, 0.0, None, None, None, None, None, None, "FLAT"
-        )
-        
         surface_style_with_textures = model.createIfcSurfaceStyleWithTextures(
             [texture]
         )
@@ -310,24 +259,14 @@ def apply_texture_to_faces(
             if hasattr(face, 'Bounds'):
                 for bound in face.Bounds:
                     if hasattr(bound, 'Bound') and hasattr(bound.Bound, 'Points'):
-                        # Create texture vertices for this face
-                        texture_vertices = []
-                        for point in bound.Bound.Points:
-                            # Get UV coordinate for this vertex
-                            vertex_key = (point.Coordinates[0], point.Coordinates[1], point.Coordinates[2])
-                            uv = vertex_to_uv.get(vertex_key, (0.0, 0.0))
-                            texture_vertex = model.createIfcTextureVertex([uv[0], uv[1]])
-                            texture_vertices.append(texture_vertex)
-                        
                         # Create texture map for this face
-                        if texture_vertices:
-                            texture_map = model.createIfcTextureMap(
-                                MappedTo=bound.Bound,
-                                Maps=[texture]
-                            )
-                            
-                            # Apply style
-                            model.createIfcStyledItem(face, [surface_style], None)
+                        texture_map = model.createIfcTextureMap(
+                            MappedTo=bound.Bound,
+                            Maps=[texture]
+                        )
+                        
+                        # Apply style
+                        model.createIfcStyledItem(face, [surface_style], None)
         
         return True
         

@@ -99,6 +99,16 @@ class SwissRailwayLoader:
         return (min_x, min_y, max_x, max_y)
     
     @rate_limit_overpass
+    def _make_single_request(self, query: str):
+        """Make a single Overpass API request with rate limiting applied"""
+        response = requests.post(
+            OVERPASS_API_URL,
+            data={'data': query},
+            timeout=self.timeout
+        )
+        response.raise_for_status()
+        return response.json()
+    
     def _request_overpass(self, query: str) -> Optional[Dict]:
         """
         Make request to Overpass API with retry logic
@@ -111,13 +121,8 @@ class SwissRailwayLoader:
         """
         for attempt in range(self.retry_count):
             try:
-                response = requests.post(
-                    OVERPASS_API_URL,
-                    data={'data': query},
-                    timeout=self.timeout
-                )
-                response.raise_for_status()
-                return response.json()
+                # Rate limiting is applied for each request attempt
+                return self._make_single_request(query)
             except requests.RequestException as e:
                 logger.warning(f"Overpass API request failed (attempt {attempt + 1}/{self.retry_count}): {e}")
                 if attempt < self.retry_count - 1:
