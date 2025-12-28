@@ -130,7 +130,8 @@ class SwissRailwayLoader:
     def get_railways_in_bbox(
         self,
         bbox_2056: Tuple[float, float, float, float],
-        railway_types: Optional[List[str]] = None
+        railway_types: Optional[List[str]] = None,
+        exclude_tunnels: bool = True
     ) -> List[RailwayFeature]:
         """
         Get railways in bounding box
@@ -139,6 +140,7 @@ class SwissRailwayLoader:
             bbox_2056: Bounding box (min_x, min_y, max_x, max_y) in EPSG:2056
             railway_types: List of railway types to include (default: all)
                           Options: "rail", "tram", "light_rail", "subway", "narrow_gauge", "funicular"
+            exclude_tunnels: If True, filter out railways in tunnels (default: True)
         
         Returns:
             List of RailwayFeature objects
@@ -199,6 +201,30 @@ out geom;
             if railway_types and railway_type not in railway_types:
                 continue
             
+            # Skip tunnels if exclude_tunnels is True
+            if exclude_tunnels:
+                # Check for tunnel tags
+                tunnel_tag = tags.get('tunnel', '').lower()
+                if tunnel_tag in ('yes', 'building_passage', 'covered'):
+                    continue
+                
+                # Check for covered tag
+                if tags.get('covered', '').lower() == 'yes':
+                    continue
+                
+                # Check for negative layer (underground)
+                layer_str = tags.get('layer', '0')
+                try:
+                    layer = int(layer_str)
+                    if layer < 0:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+                
+                # Skip subway (usually underground)
+                if railway_type == 'subway':
+                    continue
+            
             # Get geometry
             geometry_data = element.get('geometry', [])
             if not geometry_data:
@@ -256,7 +282,8 @@ out geom;
         x: float,
         y: float,
         radius: float = 500,
-        railway_types: Optional[List[str]] = None
+        railway_types: Optional[List[str]] = None,
+        exclude_tunnels: bool = True
     ) -> List[RailwayFeature]:
         """
         Get railways within radius of a point
@@ -266,6 +293,7 @@ out geom;
             y: Y coordinate in EPSG:2056
             radius: Radius in meters
             railway_types: List of railway types to include
+            exclude_tunnels: If True, filter out railways in tunnels (default: True)
             
         Returns:
             List of RailwayFeature objects
@@ -278,7 +306,7 @@ out geom;
             y + radius
         )
         
-        railways = self.get_railways_in_bbox(bbox, railway_types)
+        railways = self.get_railways_in_bbox(bbox, railway_types, exclude_tunnels)
         
         # Filter to circular area
         center = Point(x, y)
@@ -294,7 +322,8 @@ out geom;
         self,
         egrid: str,
         buffer_m: float = 10,
-        railway_types: Optional[List[str]] = None
+        railway_types: Optional[List[str]] = None,
+        exclude_tunnels: bool = True
     ) -> List[RailwayFeature]:
         """
         Get railways on or near a cadastral parcel
@@ -303,6 +332,7 @@ out geom;
             egrid: Swiss EGRID identifier
             buffer_m: Buffer around parcel boundary in meters
             railway_types: List of railway types to include
+            exclude_tunnels: If True, filter out railways in tunnels (default: True)
             
         Returns:
             List of RailwayFeature objects
@@ -331,7 +361,7 @@ out geom;
         )
         
         # Get railways in bbox
-        railways = self.get_railways_in_bbox(bbox, railway_types)
+        railways = self.get_railways_in_bbox(bbox, railway_types, exclude_tunnels)
         
         # Filter to railways that intersect the parcel (with buffer)
         if buffer_m > 0:
@@ -357,7 +387,8 @@ out geom;
 def get_railways_around_egrid(
     egrid: str,
     buffer_m: float = 10,
-    railway_types: Optional[List[str]] = None
+    railway_types: Optional[List[str]] = None,
+    exclude_tunnels: bool = True
 ) -> List[RailwayFeature]:
     """
     Get railways around a cadastral parcel identified by EGRID
@@ -366,17 +397,19 @@ def get_railways_around_egrid(
         egrid: Swiss EGRID identifier
         buffer_m: Buffer around parcel boundary
         railway_types: List of railway types to include
+        exclude_tunnels: If True, filter out railways in tunnels (default: True)
         
     Returns:
         List of RailwayFeature objects
     """
     loader = SwissRailwayLoader()
-    return loader.get_railways_on_parcel(egrid, buffer_m, railway_types)
+    return loader.get_railways_on_parcel(egrid, buffer_m, railway_types, exclude_tunnels)
 
 
 def get_railways_in_bbox(
     bbox_2056: Tuple[float, float, float, float],
-    railway_types: Optional[List[str]] = None
+    railway_types: Optional[List[str]] = None,
+    exclude_tunnels: bool = True
 ) -> List[RailwayFeature]:
     """
     Get railways in bounding box
@@ -384,12 +417,13 @@ def get_railways_in_bbox(
     Args:
         bbox_2056: Bounding box (min_x, min_y, max_x, max_y) in EPSG:2056
         railway_types: List of railway types to include
+        exclude_tunnels: If True, filter out railways in tunnels (default: True)
         
     Returns:
         List of RailwayFeature objects
     """
     loader = SwissRailwayLoader()
-    return loader.get_railways_in_bbox(bbox_2056, railway_types)
+    return loader.get_railways_in_bbox(bbox_2056, railway_types, exclude_tunnels)
 
 
 if __name__ == "__main__":

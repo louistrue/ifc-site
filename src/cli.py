@@ -22,21 +22,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate IFC site model with terrain, site solid, roads, trees, water, and buildings",
+        description="Generate IFC site model with terrain, site solid, roads, trees, water, buildings, and satellite imagery textures",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Full model with ALL features (recommended)
+  # Full model with ALL features including satellite imagery (recommended)
   %(prog)s --address "Bundesplatz 3, Bern" --all --output site.ifc
   
-  # Using EGRID with all features
+  # Using EGRID with all features and satellite imagery
   %(prog)s --egrid CH999979659148 --all --output site.ifc
   
-  # Custom selection
-  %(prog)s --address "Bahnhofstrasse 1, Zürich" --include-roads --include-buildings --output custom.ifc
+  # Custom selection with satellite imagery and glTF export
+  %(prog)s --address "Bahnhofstrasse 1, Zürich" --include-roads --include-buildings --include-satellite-overlay --output custom.ifc
   
-  # Large detailed area
-  %(prog)s --address "Paradeplatz, Zürich" --all --radius 500 --resolution 10 --output detailed.ifc
+  # Large detailed area with high-resolution imagery
+  %(prog)s --address "Paradeplatz, Zürich" --all --radius 500 --resolution 10 --imagery-resolution 0.25 --output detailed.ifc
+  
+  # IFC only (no glTF) with satellite imagery
+  %(prog)s --address "Paradeplatz, Zürich" --include-satellite-overlay --no-export-gltf --output site.ifc
+  
+  # Historical imagery from 2020
+  %(prog)s --address "Paradeplatz, Zürich" --include-satellite-overlay --imagery-year 2020 --output historical.ifc
         """
     )
     
@@ -115,9 +121,26 @@ Examples:
     bridge_group.add_argument("--include-bridges", action="store_true",
                               help="Include bridges from OpenStreetMap")
     
+    # Satellite imagery configuration
+    imagery_group = parser.add_argument_group("Satellite Imagery Options")
+    imagery_group.add_argument("--include-satellite-overlay", action="store_true",
+                               help="Include satellite imagery texture overlay (SWISSIMAGE)")
+    imagery_group.add_argument("--embed-imagery", action="store_true", default=True,
+                               help="Embed imagery in IFC file (default: True)")
+    imagery_group.add_argument("--no-embed-imagery", dest="embed_imagery", action="store_false",
+                               help="Use external URL references for imagery (smaller files)")
+    imagery_group.add_argument("--imagery-resolution", type=float, default=0.5,
+                               help="Imagery resolution in meters per pixel (default: 0.5)")
+    imagery_group.add_argument("--imagery-year", type=str, default=None,
+                               help="Year for historical imagery (e.g., '2020'), default: 'current'")
+    imagery_group.add_argument("--export-gltf", action="store_true", default=None,
+                               help="Export glTF/GLB file alongside IFC (default: auto-enable when imagery enabled)")
+    imagery_group.add_argument("--no-export-gltf", dest="export_gltf", action="store_false",
+                               help="Disable glTF export even when imagery is enabled")
+    
     # Convenience flag for all features
     parser.add_argument("--all", action="store_true",
-                        help="Include ALL features (roads, forest, water, buildings, railways)")
+                        help="Include ALL features (roads, forest, water, buildings, railways, satellite imagery)")
     
     # Output
     parser.add_argument("--output", default="combined_terrain.ifc",
@@ -132,6 +155,7 @@ Examples:
         args.include_water = True
         args.include_buildings = True
         args.include_railways = True
+        args.include_satellite_overlay = True  # Include satellite imagery with --all
         # Note: bridges excluded from --all due to experimental status and potential performance impact.
         # Use --include-bridges explicitly if needed.
     
@@ -153,11 +177,17 @@ Examples:
         features.append("railways")
     if args.include_bridges:
         features.append("bridges")
+    if args.include_satellite_overlay:
+        features.append("satellite-imagery")
     
     # Show configuration summary IMMEDIATELY
     print(f"\nConfiguration:", flush=True)
     print(f"  Radius: {args.radius}m | Resolution: {args.resolution}m", flush=True)
     print(f"  Features: {', '.join(features)}", flush=True)
+    if args.include_satellite_overlay:
+        print(f"  Imagery: {args.imagery_resolution}m resolution, {'embedded' if args.embed_imagery else 'external URLs'}", flush=True)
+        if args.export_gltf is not False:  # Show if enabled or auto
+            print(f"  glTF export: {'enabled' if args.export_gltf else 'auto (when imagery enabled)'}", flush=True)
     print(f"  Output: {args.output}", flush=True)
     
     # If address provided, resolve it EARLY (before heavy imports)
@@ -208,7 +238,32 @@ Examples:
             forest_threshold=args.forest_threshold,
             embed_roads_in_terrain=not args.roads_as_separate_elements,
             output_path=args.output,
+            include_satellite_overlay=args.include_satellite_overlay,
+            embed_imagery=args.embed_imagery,
+            imagery_resolution=args.imagery_resolution,
+            imagery_year=args.imagery_year,
+            export_gltf=args.export_gltf,
         )
+        
+        # Print success message with file information
+        print("\n" + "=" * 60)
+        print("SUCCESS: Files created!")
+        print("=" * 60)
+        print(f"IFC file: {args.output}")
+        
+        # Check if glTF was exported
+        gltf_path = os.path.splitext(args.output)[0] + ".glb"
+        if os.path.exists(gltf_path):
+            gltf_size = os.path.getsize(gltf_path) / (1024 * 1024)  # MB
+            print(f"glTF file: {gltf_path} ({gltf_size:.1f} MB)")
+            print(f"  → Open in Three.js viewer or Blender to see satellite imagery texture")
+        
+        # Check if texture file was created
+        texture_path = os.path.splitext(args.output)[0] + "_texture.jpg"
+        if os.path.exists(texture_path):
+            texture_size = os.path.getsize(texture_path) / (1024 * 1024)  # MB
+            print(f"Texture file: {texture_path} ({texture_size:.1f} MB)")
+        
     except requests.Timeout as exc:
         print(f"Upstream request timed out: {exc}")
         sys.exit(1)

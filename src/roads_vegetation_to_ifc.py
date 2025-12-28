@@ -1951,14 +1951,15 @@ SLEEPER_LENGTH = 2.6  # meters
 SLEEPER_WIDTH = 0.26  # meters
 SLEEPER_HEIGHT = 0.16  # meters
 SLEEPER_SPACING = 0.6  # meters - spacing between sleepers
-BALLAST_WIDTH = 3.0  # meters - ballast bed width
-BALLAST_DEPTH = 0.3  # meters - ballast depth
+BALLAST_WIDTH = 3.2  # meters - ballast bed width (wider than sleepers)
+BALLAST_DEPTH = 0.35  # meters - ballast extends down into terrain
+BALLAST_TOP_OFFSET = 0.05  # meters - ballast surface sits slightly above terrain
 
 # Railway colors
-RAIL_COLOR_RGB = (0.3, 0.3, 0.3)  # Dark gray
-SLEEPER_CONCRETE_COLOR_RGB = (0.5, 0.5, 0.5)  # Gray concrete
-SLEEPER_WOOD_COLOR_RGB = (0.4, 0.3, 0.2)  # Brown wood
-BALLAST_COLOR_RGB = (0.5, 0.5, 0.5)  # Light gray gravel
+RAIL_COLOR_RGB = (0.35, 0.32, 0.30)  # Dark steel gray
+SLEEPER_CONCRETE_COLOR_RGB = (0.55, 0.53, 0.50)  # Gray concrete
+SLEEPER_WOOD_COLOR_RGB = (0.35, 0.25, 0.15)  # Dark brown weathered wood
+BALLAST_COLOR_RGB = (0.45, 0.43, 0.40)  # Gray-brown gravel
 
 # Cache for railway type definitions
 _railway_type_cache = {}
@@ -2287,22 +2288,12 @@ def railway_to_ifc(
     
     origin = model.createIfcCartesianPoint([local_x, local_y, local_z])
     
-    # Calculate direction along track
-    if len(coords) >= 2:
-        dx = coords[1][0] - coords[0][0]
-        dy = coords[1][1] - coords[0][1]
-        length = (dx**2 + dy**2)**0.5
-        if length > 0:
-            axis_x = dx / length
-            axis_y = dy / length
-            axis = model.createIfcDirection([axis_x, axis_y, 0.0])
-        else:
-            axis = model.createIfcDirection([1.0, 0.0, 0.0])
-    else:
-        axis = model.createIfcDirection([1.0, 0.0, 0.0])
-    
-    ref_direction = model.createIfcDirection([0.0, 0.0, 1.0])
-    axis2_placement = model.createIfcAxis2Placement3D(origin, ref_direction, axis)
+    # Use standard axis-aligned placement (no rotation)
+    # Geometry points are already in global coords relative to first point,
+    # so we don't want to rotate the local coordinate system
+    z_axis = model.createIfcDirection([0.0, 0.0, 1.0])
+    x_axis = model.createIfcDirection([1.0, 0.0, 0.0])
+    axis2_placement = model.createIfcAxis2Placement3D(origin, z_axis, x_axis)
     railway_placement = model.createIfcLocalPlacement(
         site.ObjectPlacement,
         axis2_placement
@@ -2330,6 +2321,8 @@ def railway_to_ifc(
     import math
     
     # Prepare coordinates relative to placement origin
+    # Ballast sits at terrain level with BALLAST_TOP_OFFSET above, extending BALLAST_DEPTH below
+    # Sleepers sit on top of ballast, rails sit on top of sleepers
     if elevations and len(elevations) == len(coords):
         coords_3d = [
             (float(x - first_x), float(y - first_y), float(z - z_adjustment))
@@ -2342,9 +2335,58 @@ def railway_to_ifc(
         ]
     
     half_gauge = gauge / 2.0
+    half_ballast_w = BALLAST_WIDTH / 2.0
     all_faces = []
+    ballast_faces = []  # Separate list for ballast (different color)
+    
+    # === CREATE BALLAST BED (trapezoidal cross-section along track) ===
+    for segment_idx in range(len(coords_3d) - 1):
+        x1, y1, z1 = coords_3d[segment_idx]
+        x2, y2, z2 = coords_3d[segment_idx + 1]
+        
+        dx = x2 - x1
+        dy = y2 - y1
+        segment_length = (dx**2 + dy**2)**0.5
+        if segment_length < 0.01:
+            continue
+        
+        perp_x = -dy / segment_length
+        perp_y = dx / segment_length
+        
+        # Ballast top surface (slightly above terrain)
+        bt_z1 = z1 + BALLAST_TOP_OFFSET
+        bt_z2 = z2 + BALLAST_TOP_OFFSET
+        # Ballast bottom surface (below terrain)
+        bb_z1 = z1 - BALLAST_DEPTH
+        bb_z2 = z2 - BALLAST_DEPTH
+        
+        # Trapezoidal cross-section: wider at bottom, narrower at top
+        top_offset = half_ballast_w * 0.85  # Top is slightly narrower
+        
+        # Top surface corners
+        bt1 = (x1 + perp_x * top_offset, y1 + perp_y * top_offset, bt_z1)
+        bt2 = (x2 + perp_x * top_offset, y2 + perp_y * top_offset, bt_z2)
+        bt3 = (x2 - perp_x * top_offset, y2 - perp_y * top_offset, bt_z2)
+        bt4 = (x1 - perp_x * top_offset, y1 - perp_y * top_offset, bt_z1)
+        
+        # Bottom surface corners (wider)
+        bb1 = (x1 + perp_x * half_ballast_w, y1 + perp_y * half_ballast_w, bb_z1)
+        bb2 = (x2 + perp_x * half_ballast_w, y2 + perp_y * half_ballast_w, bb_z2)
+        bb3 = (x2 - perp_x * half_ballast_w, y2 - perp_y * half_ballast_w, bb_z2)
+        bb4 = (x1 - perp_x * half_ballast_w, y1 - perp_y * half_ballast_w, bb_z1)
+        
+        # Ballast faces
+        ballast_faces.append([bt1, bt2, bt3, bt4])  # Top
+        ballast_faces.append([bb4, bb3, bb2, bb1])  # Bottom
+        ballast_faces.append([bt1, bt4, bb4, bb1])  # Side 1 (sloped)
+        ballast_faces.append([bt2, bt1, bb1, bb2])  # End 1
+        ballast_faces.append([bt3, bt2, bb2, bb3])  # Side 2 (sloped)
+        ballast_faces.append([bt4, bt3, bb3, bb4])  # End 2
     
     # === CREATE RAILS (two parallel swept solids) ===
+    # Rails sit on top of sleepers, which sit on ballast
+    rail_base_offset = BALLAST_TOP_OFFSET + SLEEPER_HEIGHT  # Rails base is above sleeper top
+    
     for segment_idx in range(len(coords_3d) - 1):
         x1, y1, z1 = coords_3d[segment_idx]
         x2, y2, z2 = coords_3d[segment_idx + 1]
@@ -2363,16 +2405,20 @@ def railway_to_ifc(
         # Rail dimensions
         half_rail_width = RAIL_HEAD_WIDTH / 2.0
         
+        # Rail base z positions (on top of sleepers)
+        rz1 = z1 + rail_base_offset
+        rz2 = z2 + rail_base_offset
+        
         # === LEFT RAIL ===
         # Bottom corners
         lb1 = (x1 + perp_x * half_gauge - perp_x * half_rail_width, 
-               y1 + perp_y * half_gauge - perp_y * half_rail_width, z1)
+               y1 + perp_y * half_gauge - perp_y * half_rail_width, rz1)
         lb2 = (x2 + perp_x * half_gauge - perp_x * half_rail_width, 
-               y2 + perp_y * half_gauge - perp_y * half_rail_width, z2)
+               y2 + perp_y * half_gauge - perp_y * half_rail_width, rz2)
         lb3 = (x2 + perp_x * half_gauge + perp_x * half_rail_width, 
-               y2 + perp_y * half_gauge + perp_y * half_rail_width, z2)
+               y2 + perp_y * half_gauge + perp_y * half_rail_width, rz2)
         lb4 = (x1 + perp_x * half_gauge + perp_x * half_rail_width, 
-               y1 + perp_y * half_gauge + perp_y * half_rail_width, z1)
+               y1 + perp_y * half_gauge + perp_y * half_rail_width, rz1)
         # Top corners
         lt1 = (lb1[0], lb1[1], lb1[2] + RAIL_HEIGHT)
         lt2 = (lb2[0], lb2[1], lb2[2] + RAIL_HEIGHT)
@@ -2390,13 +2436,13 @@ def railway_to_ifc(
         # === RIGHT RAIL ===
         # Bottom corners
         rb1 = (x1 - perp_x * half_gauge - perp_x * half_rail_width, 
-               y1 - perp_y * half_gauge - perp_y * half_rail_width, z1)
+               y1 - perp_y * half_gauge - perp_y * half_rail_width, rz1)
         rb2 = (x2 - perp_x * half_gauge - perp_x * half_rail_width, 
-               y2 - perp_y * half_gauge - perp_y * half_rail_width, z2)
+               y2 - perp_y * half_gauge - perp_y * half_rail_width, rz2)
         rb3 = (x2 - perp_x * half_gauge + perp_x * half_rail_width, 
-               y2 - perp_y * half_gauge + perp_y * half_rail_width, z2)
+               y2 - perp_y * half_gauge + perp_y * half_rail_width, rz2)
         rb4 = (x1 - perp_x * half_gauge + perp_x * half_rail_width, 
-               y1 - perp_y * half_gauge + perp_y * half_rail_width, z1)
+               y1 - perp_y * half_gauge + perp_y * half_rail_width, rz1)
         # Top corners
         rt1 = (rb1[0], rb1[1], rb1[2] + RAIL_HEIGHT)
         rt2 = (rb2[0], rb2[1], rb2[2] + RAIL_HEIGHT)
@@ -2447,7 +2493,8 @@ def railway_to_ifc(
             # Sleeper geometry (rectangular box perpendicular to track)
             half_sleeper_len = SLEEPER_LENGTH / 2.0
             half_sleeper_w = SLEEPER_WIDTH / 2.0
-            sleeper_z = sz - SLEEPER_HEIGHT  # Sleepers sit below rail level
+            # Sleepers sit on top of ballast (bottom at ballast top level)
+            sleeper_z = sz + BALLAST_TOP_OFFSET  # Sleeper bottom is at ballast top
             
             # Sleeper corners (along track direction x perpendicular direction)
             s1 = (sx - dir_x * half_sleeper_w + perp_x * half_sleeper_len,
@@ -2483,21 +2530,49 @@ def railway_to_ifc(
         
         cumulative_distance += segment_length
     
-    # === CREATE IFC FACES ===
-    ifc_faces = []
-    for face_points in all_faces:
+    # === CREATE IFC FACES FOR BALLAST ===
+    def create_ifc_faces_list(face_list):
+        result = []
+        for face_points in face_list:
+            try:
+                ifc_points = [
+                    model.createIfcCartesianPoint([float(p[0]), float(p[1]), float(p[2])])
+                    for p in face_points
+                ]
+                polyloop = model.createIfcPolyLoop(ifc_points)
+                face_bound = model.createIfcFaceOuterBound(polyloop, True)
+                ifc_face = model.createIfcFace([face_bound])
+                result.append(ifc_face)
+            except Exception as e:
+                logger.debug(f"Error creating face: {e}")
+                continue
+        return result
+    
+    # Create ballast BRep (separate for different styling)
+    ballast_ifc_faces = create_ifc_faces_list(ballast_faces)
+    if ballast_ifc_faces:
         try:
-            ifc_points = [
-                model.createIfcCartesianPoint([float(p[0]), float(p[1]), float(p[2])])
-                for p in face_points
-            ]
-            polyloop = model.createIfcPolyLoop(ifc_points)
-            face_bound = model.createIfcFaceOuterBound(polyloop, True)
-            ifc_face = model.createIfcFace([face_bound])
-            ifc_faces.append(ifc_face)
+            ballast_shell = model.createIfcClosedShell(ballast_ifc_faces)
+            ballast_brep = model.createIfcFacetedBrep(ballast_shell)
+            
+            # Create ballast representation with distinct gravel color
+            ballast_rep = model.createIfcShapeRepresentation(
+                body_context, "Body", "Brep", [ballast_brep]
+            )
+            
+            # Apply ballast style
+            ballast_style = _create_railway_style(model, BALLAST_COLOR_RGB)
+            _apply_style_to_representation(model, ballast_rep, ballast_style)
+            
+            representations.append(ballast_rep)
+            logger.info(f"Created ballast geometry with {len(ballast_faces)} faces ({len(ballast_ifc_faces)} IFC faces)")
         except Exception as e:
-            logger.debug(f"Error creating face: {e}")
-            continue
+            logger.warning(f"Failed to create ballast BRep: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+    
+    # === CREATE IFC FACES FOR RAILS AND SLEEPERS ===
+    ifc_faces = create_ifc_faces_list(all_faces)
     
     if ifc_faces:
         try:
@@ -2508,6 +2583,11 @@ def railway_to_ifc(
             body_rep = model.createIfcShapeRepresentation(
                 body_context, "Body", "Brep", [brep]
             )
+            
+            # Apply rail/sleeper style
+            rail_style = _create_railway_style(model, RAIL_COLOR_RGB)
+            _apply_style_to_representation(model, body_rep, rail_style)
+            
             representations.append(body_rep)
             
             logger.debug(f"Created railway geometry with {len(all_faces)} faces for {railway_name}")

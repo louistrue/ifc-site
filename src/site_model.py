@@ -7,6 +7,7 @@ Main workflow orchestrator for generating IFC site models with terrain, site sol
 
 import numpy as np
 import logging
+import os
 from src.elevation import fetch_elevation_batch
 from src.loaders.cadastre import fetch_boundary_by_egrid
 from src.terrain_mesh import create_circular_terrain_grid, apply_road_recesses_to_terrain, apply_water_cutouts_to_terrain, triangulate_terrain_with_cutout
@@ -40,6 +41,11 @@ def run_combined_terrain_workflow(
     embed_roads_in_terrain=True,
     output_path="combined_terrain.ifc",
     return_model=False,
+    include_satellite_overlay=False,
+    embed_imagery=True,
+    imagery_resolution=0.5,
+    imagery_year=None,
+    export_gltf=None,  # None = auto (True if imagery enabled), False = disabled
 ):
     """
     Run the combined terrain generation workflow.
@@ -67,6 +73,11 @@ def run_combined_terrain_workflow(
         embed_roads_in_terrain: Embed roads in terrain mesh vs separate elements
         output_path: Output IFC file path
         return_model: If True, return model object instead of writing to file
+        include_satellite_overlay: Include satellite imagery texture overlay
+        embed_imagery: Embed imagery in IFC file (default: True)
+        imagery_resolution: Resolution in meters per pixel (default: 0.5)
+        imagery_year: Year for historical imagery (default: "current")
+        export_gltf: Export glTF/GLB file alongside IFC (default: None = auto-enable if imagery enabled)
     
     Returns:
         If return_model=True: (model, offset_x, offset_y, offset_z)
@@ -293,7 +304,76 @@ def run_combined_terrain_workflow(
                 logger.exception("Error loading water")
                 waters = None
 
-        # Triangulate terrain with cutouts (site, roads, and surface water)
+        # Load railways EARLY if requested (needed before triangulation for terrain cutouts)
+        railway_polygons = None
+        railway_edge_coords = None
+        railway_edge_elevations = None
+        railways = None
+        if include_railways:
+            print(f"\nLoading railways for terrain integration (radius: {radius}m)...")
+            try:
+                from src.loaders.railway import SwissRailwayLoader, RailwayFeature
+                loader = SwissRailwayLoader()
+                bounds = circle_bounds if circle_bounds else site_geometry.bounds
+                # Only include main rail lines (exclude trams, light_rail, subway, platforms, etc.)
+                main_railway_types = ["rail", "narrow_gauge", "funicular"]
+                railways = loader.get_railways_in_bbox(bounds, railway_types=main_railway_types)
+                print(f"  Found {len(railways)} main railway segments")
+                
+                # Clip railways to radius
+                if railways:
+                    from shapely.geometry import Point
+                    from shapely.ops import linemerge
+                    terrain_boundary = Point(center_x, center_y).buffer(radius, resolution=64)
+                    
+                    clipped_railways = []
+                    for r in railways:
+                        if r.geometry is None or r.geometry.is_empty:
+                            continue
+                        try:
+                            clipped_geom = r.geometry.intersection(terrain_boundary)
+                            if clipped_geom.is_empty:
+                                continue
+                            if clipped_geom.geom_type == 'MultiLineString':
+                                clipped_geom = linemerge(clipped_geom)
+                                if clipped_geom.geom_type == 'MultiLineString':
+                                    clipped_geom = max(clipped_geom.geoms, key=lambda g: g.length)
+                            if clipped_geom.geom_type != 'LineString':
+                                continue
+                            clipped_railway = RailwayFeature(
+                                id=r.id,
+                                geometry=clipped_geom,
+                                railway_type=r.railway_type,
+                                name=r.name,
+                                electrified=r.electrified,
+                                gauge=r.gauge,
+                                tracks=r.tracks,
+                                service=r.service,
+                                usage=r.usage,
+                                attributes=r.attributes
+                            )
+                            clipped_railways.append(clipped_railway)
+                        except Exception as e:
+                            logger.warning(f"Could not clip railway {r.id}: {e}")
+                            continue
+                    
+                    print(f"  Clipped {len(clipped_railways)} railways to radius")
+                    railways = clipped_railways
+                    
+                    # Apply railway recesses to terrain (creates ballast bed cutouts)
+                    print("\nApplying railway bed recesses to terrain...")
+                    from src.terrain_mesh import apply_railway_recesses_to_terrain
+                    railway_polygons, railway_edge_coords, railway_edge_elevations = apply_railway_recesses_to_terrain(
+                        railways,
+                        terrain_coords=terrain_coords,
+                        terrain_elevations=terrain_elevations,
+                        fetch_elevations_func=fetch_elevation_batch
+                    )
+            except Exception as e:
+                logger.exception("Error loading railways for terrain")
+                railways = None
+
+        # Triangulate terrain with cutouts (site, roads, water, and railways)
         print("\nTriangulating terrain...")
         terrain_triangles = triangulate_terrain_with_cutout(
             terrain_coords, terrain_elevations, site_geometry,
@@ -304,7 +384,10 @@ def run_combined_terrain_workflow(
             road_edge_elevations=road_edge_elevations,
             water_polygons=water_polygons,
             water_edge_coords=water_edge_coords,
-            water_edge_elevations=water_edge_elevations
+            water_edge_elevations=water_edge_elevations,
+            railway_polygons=railway_polygons,
+            railway_edge_coords=railway_edge_coords,
+            railway_edge_elevations=railway_edge_elevations
         )
 
     # Create site solid if requested
@@ -360,37 +443,126 @@ def run_combined_terrain_workflow(
             logger.exception("Error loading water")
             waters = None
 
-    railways = None
-    if include_railways:
+    # Railways should already be loaded during terrain processing
+    # If terrain was skipped, railways will be None - load them now
+    if include_railways and railways is None:
         print(f"\nLoading railways (radius: {radius}m)...")
         try:
-            from src.loaders.railway import SwissRailwayLoader
+            from src.loaders.railway import SwissRailwayLoader, RailwayFeature
             loader = SwissRailwayLoader()
             bounds = circle_bounds if circle_bounds else site_geometry.bounds
-            railways = loader.get_railways_in_bbox(bounds)
-            print(f"  Found {len(railways)} railway segments")
+            # Only include main rail lines (exclude trams, light_rail, subway, platforms, etc.)
+            main_railway_types = ["rail", "narrow_gauge", "funicular"]
+            railways = loader.get_railways_in_bbox(bounds, railway_types=main_railway_types)
+            print(f"  Found {len(railways)} main railway segments")
+            
+            # Clip railways to radius
             if railways:
-                railway_types = {}
+                from shapely.geometry import Point
+                from shapely.ops import linemerge
+                terrain_boundary = Point(center_x, center_y).buffer(radius, resolution=64)
+                
+                clipped_railways = []
                 for r in railways:
-                    rt = r.railway_type or "unknown"
-                    railway_types[rt] = railway_types.get(rt, 0) + 1
-                print("  Railway types:")
-                for rt, count in railway_types.items():
-                    print(f"    - {rt}: {count}")
+                    if r.geometry is None or r.geometry.is_empty:
+                        continue
+                    try:
+                        clipped_geom = r.geometry.intersection(terrain_boundary)
+                        if clipped_geom.is_empty:
+                            continue
+                        if clipped_geom.geom_type == 'MultiLineString':
+                            clipped_geom = linemerge(clipped_geom)
+                            if clipped_geom.geom_type == 'MultiLineString':
+                                clipped_geom = max(clipped_geom.geoms, key=lambda g: g.length)
+                        if clipped_geom.geom_type != 'LineString':
+                            continue
+                        clipped_railway = RailwayFeature(
+                            id=r.id,
+                            geometry=clipped_geom,
+                            railway_type=r.railway_type,
+                            name=r.name,
+                            electrified=r.electrified,
+                            gauge=r.gauge,
+                            tracks=r.tracks,
+                            service=r.service,
+                            usage=r.usage,
+                            attributes=r.attributes
+                        )
+                        clipped_railways.append(clipped_railway)
+                    except Exception as e:
+                        logger.warning(f"Could not clip railway {r.id}: {e}")
+                        continue
+                
+                print(f"  Clipped {len(clipped_railways)} railways to radius")
+                railways = clipped_railways
         except Exception:
             logger.exception("Error loading railways")
             railways = None
+    
+    # Show railway info
+    if railways:
+        railway_types = {}
+        for r in railways:
+            rt = r.railway_type or "unknown"
+            railway_types[rt] = railway_types.get(rt, 0) + 1
+        print(f"  Railway types ({len(railways)} total):")
+        for rt, count in railway_types.items():
+            print(f"    - {rt}: {count}")
 
     bridges = None
     if include_bridges:
         print(f"\nLoading bridges (radius: {radius}m)...")
         try:
-            from src.loaders.bridge import SwissBridgeLoader
+            from src.loaders.bridge import SwissBridgeLoader, BridgeFeature
             loader = SwissBridgeLoader()
             bounds = circle_bounds if circle_bounds else site_geometry.bounds
             bridges = loader.get_bridges_in_bbox(bounds)
             print(f"  Found {len(bridges)} bridges")
+            
+            # Clip bridges to radius
             if bridges:
+                from shapely.geometry import Point
+                from shapely.ops import linemerge
+                terrain_boundary = Point(center_x, center_y).buffer(radius, resolution=64)
+                
+                clipped_bridges = []
+                for b in bridges:
+                    if b.geometry is None or b.geometry.is_empty:
+                        continue
+                    try:
+                        clipped_geom = b.geometry.intersection(terrain_boundary)
+                        if clipped_geom.is_empty:
+                            continue
+                        # Handle MultiLineString from clipping
+                        if clipped_geom.geom_type == 'MultiLineString':
+                            clipped_geom = linemerge(clipped_geom)
+                            if clipped_geom.geom_type == 'MultiLineString':
+                                # Take longest segment if can't merge
+                                clipped_geom = max(clipped_geom.geoms, key=lambda g: g.length)
+                        if clipped_geom.geom_type != 'LineString':
+                            continue
+                        clipped_bridge = BridgeFeature(
+                            id=b.id,
+                            geometry=clipped_geom,
+                            bridge_type=b.bridge_type,
+                            name=b.name,
+                            structure=b.structure,
+                            material=b.material,
+                            layer=b.layer,
+                            width=b.width,
+                            carries=b.carries,
+                            maxweight=b.maxweight,
+                            attributes=b.attributes
+                        )
+                        clipped_bridges.append(clipped_bridge)
+                    except Exception as e:
+                        logger.warning(f"Could not clip bridge {b.id}: {e}")
+                        continue
+                
+                print(f"  Clipped {len(clipped_bridges)} bridges to radius")
+                bridges = clipped_bridges
+                
+                # Show bridge type breakdown
                 carries_types = {}
                 for b in bridges:
                     ct = b.carries or "unknown"
@@ -421,6 +593,34 @@ def run_combined_terrain_workflow(
             logger.exception("Error loading buildings")
             buildings = None
 
+    # Load satellite imagery if requested
+    imagery_data = None
+    if include_satellite_overlay:
+        print(f"\nLoading satellite imagery (resolution: {imagery_resolution}m)...")
+        try:
+            from src.loaders.imagery import SwissImageryLoader
+            
+            loader = SwissImageryLoader()
+            # Use circle bounds for imagery coverage
+            imagery_bbox = circle_bounds if circle_bounds else bounds
+            year = imagery_year if imagery_year else "current"
+            
+            imagery_result = loader.get_orthophoto_for_bbox(
+                imagery_bbox,
+                resolution_m=imagery_resolution,
+                year=year
+            )
+            
+            if imagery_result:
+                imagery_data = imagery_result
+                print(f"  Satellite imagery loaded successfully")
+            else:
+                logger.warning("Failed to load satellite imagery, continuing without texture")
+        except Exception as e:
+            logger.exception("Error loading satellite imagery")
+            print(f"  Warning: Could not load satellite imagery: {e}")
+            imagery_data = None
+    
     # Create IFC file
     print(f"\nCreating IFC file: {output_path}")
     result = create_combined_ifc(
@@ -428,8 +628,104 @@ def run_combined_terrain_workflow(
         center_x, center_y, egrid=egrid, cadastre_metadata=cadastre_metadata,
         roads=roads, forest_points=forest_points, waters=waters, buildings=buildings,
         railways=railways, bridges=bridges,
-        base_elevation=0.0, road_recess_depth=road_recess_depth, return_model=return_model
+        base_elevation=0.0, road_recess_depth=road_recess_depth, return_model=return_model,
+        imagery_data=imagery_data, embed_imagery=embed_imagery
     )
+    
+    # Export glTF if requested (default: auto-enable when imagery is enabled)
+    should_export_gltf = export_gltf if export_gltf is not None else include_satellite_overlay
+    if should_export_gltf and imagery_data:
+        try:
+            from src.gltf_exporter import (
+                create_terrain_mesh_with_uvs,
+                create_road_meshes,
+                create_water_meshes,
+                create_railway_meshes,
+                create_building_meshes,
+                export_gltf
+            )
+            
+            # Determine glTF output path (same name as IFC but .glb extension)
+            gltf_output_path = os.path.splitext(output_path)[0] + ".glb"
+            
+            print(f"\nCreating glTF file: {gltf_output_path}")
+            
+            # Extract imagery data
+            image_bytes, imagery_bbox = imagery_data
+            
+            # Get offsets from result
+            offset_x, offset_y, offset_z = result[:3] if isinstance(result, tuple) else (center_x, center_y, 0.0)
+            
+            # Create terrain mesh with UV mapping
+            terrain_mesh = None
+            if terrain_triangles:
+                terrain_mesh = create_terrain_mesh_with_uvs(
+                    terrain_triangles,
+                    imagery_bbox,
+                    offset_x,
+                    offset_y,
+                    offset_z
+                )
+                if terrain_mesh:
+                    print(f"  Created terrain mesh with {len(terrain_mesh.vertices)} vertices")
+            
+            # Create other meshes
+            other_meshes = []
+            
+            # Add road meshes
+            if roads:
+                road_meshes = create_road_meshes(roads, offset_x, offset_y, offset_z)
+                other_meshes.extend(road_meshes)
+                if road_meshes:
+                    print(f"  Created {len(road_meshes)} road meshes")
+            
+            # Add water meshes
+            if waters:
+                water_meshes = create_water_meshes(waters, offset_x, offset_y, offset_z)
+                other_meshes.extend(water_meshes)
+                if water_meshes:
+                    print(f"  Created {len(water_meshes)} water meshes")
+            
+            # Add railway meshes
+            if railways:
+                railway_mesh_list = create_railway_meshes(railways, offset_x, offset_y, offset_z)
+                other_meshes.extend(railway_mesh_list)
+                if railway_mesh_list:
+                    print(f"  Created {len(railway_mesh_list)} railway meshes")
+            
+            # Add building meshes (with UV mapping for satellite imagery)
+            if buildings:
+                print(f"  Creating {len(buildings)} building meshes with UV mapping...")
+                import time
+                start_time = time.time()
+                building_mesh_list = create_building_meshes(
+                    buildings, offset_x, offset_y, offset_z,
+                    imagery_bbox=imagery_bbox  # Pass imagery bbox for UV mapping
+                )
+                elapsed = time.time() - start_time
+                other_meshes.extend(building_mesh_list)
+                if building_mesh_list:
+                    print(f"  Created {len(building_mesh_list)} building meshes in {elapsed:.1f}s")
+            
+            # Export glTF
+            texture_filename = os.path.splitext(os.path.basename(output_path))[0] + "_texture.jpg"
+            success = export_gltf(
+                terrain_mesh,
+                other_meshes,
+                image_bytes,
+                texture_filename,
+                gltf_output_path
+            )
+            
+            if success:
+                print(f"  Successfully exported glTF to {gltf_output_path}")
+            else:
+                print(f"  Warning: glTF export failed")
+        except ImportError:
+            logger.warning("trimesh not available, skipping glTF export. Install with: pip install trimesh")
+        except Exception as e:
+            logger.exception("Error exporting glTF")
+            print(f"  Warning: Could not export glTF: {e}")
 
     return result
 

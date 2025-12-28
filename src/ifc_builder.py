@@ -44,7 +44,8 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
                         center_x, center_y, egrid=None, cadastre_metadata=None,
                         roads=None, forest_points=None, waters=None, buildings=None,
                         railways=None, bridges=None,
-                        base_elevation=0.0, road_recess_depth=0.0, return_model=False):
+                        base_elevation=0.0, road_recess_depth=0.0, return_model=False,
+                        imagery_data=None, embed_imagery=True):
     """
     Create an IFC file with terrain (with hole) and/or site solid, optionally with roads, trees, water, and buildings.
     
@@ -65,6 +66,8 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
         base_elevation: Base elevation for roads and trees
         road_recess_depth: How much terrain is recessed for roads (roads sit in recess)
         return_model: If True, return model object instead of writing to file
+        imagery_data: Tuple of (image_bytes, bbox) for satellite imagery texture, or None
+        embed_imagery: If True, embed imagery in IFC file (default: True)
     
     Returns:
         If return_model=True: (model, offset_x, offset_y, offset_z)
@@ -233,6 +236,52 @@ def create_combined_ifc(terrain_triangles, site_solid_data, output_path, bounds,
             body_context, "Body", "SurfaceModel", [terrain_shell_model])
         terrain.Representation = model.createIfcProductDefinitionShape(
             None, None, [terrain_rep])
+        
+        # Apply satellite imagery texture if provided
+        if imagery_data:
+            try:
+                import os
+                from src.texture_mapper import create_texture_from_image, generate_uv_coordinates, apply_texture_to_element
+                
+                image_bytes, imagery_bbox = imagery_data
+                print(f"  Applying satellite imagery texture to terrain...")
+                
+                # Determine output directory from output_path
+                output_dir = os.path.dirname(output_path) if output_path else None
+                if output_dir == '':
+                    output_dir = '.'
+                
+                # Create texture (saves to external file for better viewer compatibility)
+                texture = create_texture_from_image(
+                    model, image_bytes, "SWISSIMAGE_Terrain", 
+                    embed=embed_imagery,
+                    output_dir=output_dir,
+                    ifc_filename=output_path
+                )
+                
+                if texture:
+                    # Generate UV coordinates for all terrain vertices
+                    all_vertices = []
+                    for tri in terrain_triangles:
+                        for pt in tri:
+                            # Convert to local coordinates
+                            local_pt = (pt[0] - offset_x, pt[1] - offset_y, pt[2] - offset_z)
+                            all_vertices.append(local_pt)
+                    
+                    # Generate UV coordinates
+                    uv_coords = generate_uv_coordinates(all_vertices, imagery_bbox)
+                    
+                    # Apply texture to terrain element
+                    apply_texture_to_element(
+                        model, terrain, texture, all_vertices, uv_coords, imagery_bbox, body_context, embed=embed_imagery
+                    )
+                    print(f"  Applied satellite imagery texture")
+                else:
+                    logger.warning("Failed to create texture")
+            except Exception as e:
+                logger.warning(f"Could not apply satellite imagery texture: {e}")
+                import traceback
+                traceback.print_exc()
     
     # Create site solid
     if site_solid_data:
