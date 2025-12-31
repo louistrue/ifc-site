@@ -419,16 +419,19 @@ def run_combined_terrain_workflow(
         print(f"\nLoading forest trees...")
         try:
             from src.loaders.forest import SwissTreeLoader
+            print(f"  Initializing forest loader...")
             loader = SwissTreeLoader()
             bounds = circle_bounds if circle_bounds else site_geometry.bounds
+            print(f"  Fetching trees in bounds: {bounds}")
             forest_points = loader.get_trees_in_bounds(
-                bounds, 
+                bounds,
                 fetch_elevations_func=fetch_elevation_batch,
                 max_features=1000  # Limit to reasonable number
             )
             print(f"  Found {len(forest_points)} trees/hedges")
         except Exception as e:
             logger.exception("Error loading forest")
+            print(f"  Warning: Forest loading failed: {e}")
             forest_points = None
 
     # If water wasn't loaded during terrain processing (e.g., terrain disabled), load it now
@@ -580,11 +583,13 @@ def run_combined_terrain_workflow(
         print("\nLoading buildings...")
         try:
             from src.loaders.building import CityGMLBuildingLoader
+            print("  Initializing building loader...")
             loader = CityGMLBuildingLoader()
             bounds = circle_bounds if circle_bounds else site_geometry.bounds
             # Use only 1 tile to save disk space (GDB files are large ~40MB each)
             # One tile typically contains enough buildings for most areas
             max_tiles = 1
+            print(f"  Fetching buildings in bounds: {bounds}")
             buildings = loader.get_buildings_in_bbox(bounds, max_tiles=max_tiles)
             print(f"  Found {len(buildings)} buildings")
             if buildings:
@@ -592,6 +597,7 @@ def run_combined_terrain_workflow(
                     print(f"    {i+1}. {b.id[:40]}... - {b.building_type if b.building_type else 'unknown'} - {len(b.faces)} faces")
         except Exception as e:
             logger.exception("Error loading buildings")
+            print(f"  Warning: Building loading failed: {e}")
             buildings = None
 
     # Load satellite imagery if requested
