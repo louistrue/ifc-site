@@ -64,12 +64,12 @@ class CityGMLBuildingLoader:
     STAC_BASE = "https://data.geo.admin.ch/api/stac/v1"
     COLLECTION = "ch.swisstopo.swissbuildings3d_3_0"
     
-    def __init__(self, timeout: int = 120):
+    def __init__(self, timeout: int = 30):
         """
         Initialize CityGML loader
-        
+
         Args:
-            timeout: Request timeout in seconds
+            timeout: Request timeout in seconds (default: 30s for web API compatibility)
         """
         self.timeout = timeout
         self.transformer = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
@@ -102,9 +102,12 @@ class CityGMLBuildingLoader:
         # We only process max_tiles (typically 1), but need extras to find one with CityGML/GDB
         query_limit = max(max_tiles * 3, 3)
         params = {'bbox': ','.join(map(str, bbox_wgs84)), 'limit': query_limit}
-        
+
+        logger.info(f"Querying STAC API: {url} (timeout: {self.timeout}s)")
+        print(f"  Querying building tiles from STAC API...")
         response = requests.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
+        print(f"  STAC query completed")
         
         tiles = response.json().get('features', [])
         if not tiles:
@@ -178,10 +181,13 @@ class CityGMLBuildingLoader:
         # Download and extract
         with tempfile.TemporaryDirectory() as tmpdir:
             zip_path = os.path.join(tmpdir, 'buildings.zip')
-            
+
+            logger.info(f"Downloading CityGML tile: {citygml_url[:80]}... (timeout: {self.timeout}s)")
+            print(f"    Downloading CityGML tile...")
             response = requests.get(citygml_url, timeout=self.timeout, stream=True)
             response.raise_for_status()
-            
+
+            print(f"    Extracting tile data...")
             with open(zip_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
