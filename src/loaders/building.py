@@ -266,51 +266,66 @@ class CityGMLBuildingLoader:
         Returns:
             List of CityGMLBuilding objects
         """
-        tree = safe_parse(gml_path)
-        root = tree.getroot()
-        
+        # Use iterative parsing to STOP READING the file after max_buildings
+        # This is CRITICAL - prevents loading entire 40MB XML into memory
+        import xml.etree.ElementTree as ET
+
         # Define namespaces
         ns = {
             'bldg': 'http://www.opengis.net/citygml/building/2.0',
             'gml': 'http://www.opengis.net/gml',
             'gen': 'http://www.opengis.net/citygml/generics/2.0'
         }
-        
-        all_buildings_elem = root.findall('.//bldg:Building', ns)
-        total_in_file = len(all_buildings_elem)
-        logger.debug(f"Found {total_in_file} buildings in CityGML file")
 
         target_box = box(*bbox_2056)
         buildings = []
+        buildings_processed = 0
 
-        for b_elem in all_buildings_elem:
-            # CRITICAL: Stop parsing after reaching max_buildings limit
-            # This is the fix for the container timeout issue
+        # Stream through XML file - only reads what we need
+        context = ET.iterparse(gml_path, events=('end',))
+
+        for event, elem in context:
+            # Check if this is a Building element
+            if elem.tag != '{http://www.opengis.net/citygml/building/2.0}Building':
+                # Clear non-building elements immediately to save memory
+                elem.clear()
+                continue
+
+            buildings_processed += 1
+
+            # CRITICAL: Stop reading XML file after limit
+            # This breaks the iterparse loop and stops file I/O
             if max_buildings and len(buildings) >= max_buildings:
-                logger.info(f"Reached building limit ({max_buildings}/{total_in_file} buildings in file), stopping parse")
-                print(f"    Stopped at {max_buildings} buildings (file contains {total_in_file})")
+                logger.info(f"Reached building limit of {max_buildings} (processed {buildings_processed} building elements), stopping XML parse")
+                print(f"    Stopped at {max_buildings} buildings (processed {buildings_processed} elements)")
+                elem.clear()
                 break
+
+            # Process this Building element
+            b_elem = elem
 
             # Check for lod2Solid
             lod2solid = b_elem.find('.//bldg:lod2Solid', ns)
             if lod2solid is None:
+                elem.clear()
                 continue
-            
+
             solid = lod2solid.find('.//gml:Solid', ns)
             if solid is None:
+                elem.clear()
                 continue
-            
+
             bldg_id = b_elem.get('{http://www.opengis.net/gml}id', 'unknown')
-            
+
             # Extract attributes
             dach_max = b_elem.find('.//gen:doubleAttribute[@name="DACH_MAX"]/gen:value', ns)
             dach_min = b_elem.find('.//gen:doubleAttribute[@name="DACH_MIN"]/gen:value', ns)
             objektart = b_elem.find('.//gen:stringAttribute[@name="OBJEKTART"]/gen:value', ns)
-            
+
             height_max = float(dach_max.text) if dach_max is not None else None
             height_min = float(dach_min.text) if dach_min is not None else None
             building_type = objektart.text if objektart is not None else None
-            
+
             # Extract all attributes
             attrs = {}
             for attr in b_elem.findall('.//gen:*', ns):
@@ -318,51 +333,54 @@ class CityGMLBuildingLoader:
                 value_elem = attr.find('gen:value', ns)
                 if name and value_elem is not None:
                     attrs[name] = value_elem.text
-            
+
             # Extract geometry faces
             faces_data = []
             all_points = []
-            
+
             comp_surface = solid.find('.//gml:CompositeSurface', ns)
             if comp_surface is None:
+                elem.clear()
                 continue
-            
+
             for surf_member in comp_surface.findall('.//gml:surfaceMember', ns):
                 polygon = surf_member.find('.//gml:Polygon', ns)
                 if polygon is None:
                     continue
-                
+
                 poslist = polygon.find('.//gml:posList', ns)
                 if poslist is None:
                     continue
-                
+
                 coords_text = poslist.text.strip()
                 coords_list = [float(x) for x in coords_text.split()]
-                
+
                 # Group into XYZ triples
-                points = [(coords_list[i], coords_list[i+1], coords_list[i+2]) 
+                points = [(coords_list[i], coords_list[i+1], coords_list[i+2])
                          for i in range(0, len(coords_list), 3)]
-                
+
                 if len(points) >= 3:
                     faces_data.append(points)
                     all_points.extend(points)
-            
+
             if not faces_data:
+                elem.clear()
                 continue
-            
+
             # Calculate bounding box and centroid
             xs = [p[0] for p in all_points]
             ys = [p[1] for p in all_points]
             zs = [p[2] for p in all_points]
-            
+
             centroid_x = sum(xs) / len(xs)
             centroid_y = sum(ys) / len(ys)
-            
+
             # Check if building intersects target area
             building_bbox = box(min(xs), min(ys), max(xs), max(ys))
             if not target_box.intersects(building_bbox):
+                elem.clear()
                 continue
-            
+
             buildings.append(CityGMLBuilding(
                 id=bldg_id,
                 faces=faces_data,
@@ -374,7 +392,10 @@ class CityGMLBuildingLoader:
                 z_max=max(zs),
                 attributes=attrs
             ))
-        
+
+            # Clear this building element from memory now that we're done with it
+            elem.clear()
+
         return buildings
     
     def _get_buildings_from_gdb(
