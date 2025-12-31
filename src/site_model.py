@@ -589,8 +589,10 @@ def run_combined_terrain_workflow(
             # Use only 1 tile to save disk space (GDB files are large ~40MB each)
             # One tile typically contains enough buildings for most areas
             max_tiles = 1
+            # Limit to 50 buildings to prevent timeout issues (parsing CityGML is CPU-intensive)
+            max_buildings = 50
             print(f"  Fetching buildings in bounds: {bounds}")
-            buildings = loader.get_buildings_in_bbox(bounds, max_tiles=max_tiles)
+            buildings = loader.get_buildings_in_bbox(bounds, max_tiles=max_tiles, max_buildings=max_buildings)
             print(f"  Found {len(buildings)} buildings")
             if buildings:
                 for i, b in enumerate(buildings[:5]):

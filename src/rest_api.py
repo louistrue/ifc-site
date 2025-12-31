@@ -190,7 +190,7 @@ class GenerateRequest(BaseModel):
     # Building options
     include_buildings: bool = Field(
         False,
-        description="Include buildings from CityGML",
+        description="Include buildings from CityGML (limited to 50 buildings for performance)",
         example=False
     )
 

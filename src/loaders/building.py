@@ -77,15 +77,17 @@ class CityGMLBuildingLoader:
     def get_buildings_in_bbox(
         self,
         bbox_2056: Tuple[float, float, float, float],
-        max_tiles: int = 1
+        max_tiles: int = 1,
+        max_buildings: Optional[int] = None
     ) -> List[CityGMLBuilding]:
         """
         Get complete 3D buildings in bounding box from CityGML tiles
-        
+
         Args:
             bbox_2056: Bounding box (min_x, min_y, max_x, max_y) in EPSG:2056
             max_tiles: Maximum number of tiles to process
-            
+            max_buildings: Maximum number of buildings to parse (None = unlimited)
+
         Returns:
             List of CityGMLBuilding objects with complete 3D geometry
         """
@@ -125,18 +127,26 @@ class CityGMLBuildingLoader:
             logger.info(f"Found {len(tiles)} tiles but none have CityGML assets - trying GDB fallback")
             # Fall back to GDB parsing for regions without CityGML (e.g., Geneva, Lausanne 2020+)
             return self._get_buildings_from_gdb(tiles, bbox_2056, max_tiles)
-        
-        logger.info(f"Found {len(citygml_tiles)} CityGML tiles (of {len(tiles)} total), processing up to {max_tiles}...")
-        
+
+        limit_msg = f" (limiting to {max_buildings} buildings)" if max_buildings else ""
+        logger.info(f"Found {len(citygml_tiles)} CityGML tiles (of {len(tiles)} total), processing up to {max_tiles}{limit_msg}...")
+        if max_buildings:
+            print(f"  Limiting to first {max_buildings} buildings for performance")
+
         all_buildings = []
         processed_count = 0
         citygml_failed = False
-        
+
         for tile in citygml_tiles:
             if processed_count >= max_tiles:
                 break
+            # Stop if we've reached the building limit
+            if max_buildings and len(all_buildings) >= max_buildings:
+                logger.info(f"Reached building limit of {max_buildings}, stopping tile processing")
+                break
             try:
-                buildings = self._process_tile(tile, bbox_2056)
+                remaining = max_buildings - len(all_buildings) if max_buildings else None
+                buildings = self._process_tile(tile, bbox_2056, max_buildings=remaining)
                 all_buildings.extend(buildings)
                 processed_count += 1
                 logger.info(f"Processed tile {processed_count}/{min(len(citygml_tiles), max_tiles)}: {len(buildings)} buildings")
@@ -156,15 +166,17 @@ class CityGMLBuildingLoader:
     def _process_tile(
         self,
         tile: Dict,
-        bbox_2056: Tuple[float, float, float, float]
+        bbox_2056: Tuple[float, float, float, float],
+        max_buildings: Optional[int] = None
     ) -> List[CityGMLBuilding]:
         """
         Download and parse a CityGML tile
-        
+
         Args:
             tile: STAC tile feature
             bbox_2056: Target bounding box for filtering
-            
+            max_buildings: Maximum number of buildings to parse (None = unlimited)
+
         Returns:
             List of buildings in the target area
         """
@@ -232,22 +244,25 @@ class CityGMLBuildingLoader:
             
             if not gml_file:
                 raise ValueError("No GML file found in extracted archive")
-            
+
             # Parse CityGML
-            return self._parse_citygml(gml_file, bbox_2056)
+            print(f"    Parsing CityGML file...")
+            return self._parse_citygml(gml_file, bbox_2056, max_buildings=max_buildings)
     
     def _parse_citygml(
         self,
         gml_path: str,
-        bbox_2056: Tuple[float, float, float, float]
+        bbox_2056: Tuple[float, float, float, float],
+        max_buildings: Optional[int] = None
     ) -> List[CityGMLBuilding]:
         """
         Parse CityGML file and extract buildings with lod2Solid
-        
+
         Args:
             gml_path: Path to CityGML file
             bbox_2056: Bounding box for filtering (EPSG:2056)
-            
+            max_buildings: Maximum number of buildings to parse (None = unlimited)
+
         Returns:
             List of CityGMLBuilding objects
         """
@@ -262,12 +277,20 @@ class CityGMLBuildingLoader:
         }
         
         all_buildings_elem = root.findall('.//bldg:Building', ns)
-        logger.debug(f"Found {len(all_buildings_elem)} buildings in CityGML file")
-        
+        total_in_file = len(all_buildings_elem)
+        logger.debug(f"Found {total_in_file} buildings in CityGML file")
+
         target_box = box(*bbox_2056)
         buildings = []
-        
+
         for b_elem in all_buildings_elem:
+            # CRITICAL: Stop parsing after reaching max_buildings limit
+            # This is the fix for the container timeout issue
+            if max_buildings and len(buildings) >= max_buildings:
+                logger.info(f"Reached building limit ({max_buildings}/{total_in_file} buildings in file), stopping parse")
+                print(f"    Stopped at {max_buildings} buildings (file contains {total_in_file})")
+                break
+
             # Check for lod2Solid
             lod2solid = b_elem.find('.//bldg:lod2Solid', ns)
             if lod2solid is None:
