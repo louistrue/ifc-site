@@ -111,11 +111,11 @@ class GenerateRequest(BaseModel):
         example=10.0
     )
     densify: float = Field(
-        0.5,
+        2.0,
         ge=0.1,
         le=10.0,
         description="Site boundary densification interval (meters). Lower values create more boundary points.",
-        example=0.5
+        example=2.0
     )
     attach_to_solid: bool = Field(
         False,
@@ -132,6 +132,116 @@ class GenerateRequest(BaseModel):
         description="Include site boundary solid",
         example=True
     )
+
+    # Road options
+    include_roads: bool = Field(
+        False,
+        description="Include roads from Swiss road data",
+        example=False
+    )
+    road_buffer_m: float = Field(
+        100.0,
+        gt=0,
+        le=500,
+        description="Buffer distance for road search (meters)",
+        example=100.0
+    )
+    road_recess_depth: float = Field(
+        0.15,
+        ge=0.0,
+        le=1.0,
+        description="Depth to recess roads into terrain (meters)",
+        example=0.15
+    )
+    embed_roads_in_terrain: bool = Field(
+        True,
+        description="Embed roads in terrain mesh vs separate elements",
+        example=True
+    )
+
+    # Forest options
+    include_forest: bool = Field(
+        False,
+        description="Include forest trees and hedges",
+        example=False
+    )
+    forest_spacing: float = Field(
+        20.0,
+        gt=0,
+        le=100,
+        description="Spacing between forest sample points (meters)",
+        example=20.0
+    )
+    forest_threshold: float = Field(
+        30.0,
+        ge=0,
+        le=100,
+        description="Minimum forest coverage to place tree (0-100)",
+        example=30.0
+    )
+
+    # Water options
+    include_water: bool = Field(
+        False,
+        description="Include water features (creeks, rivers, lakes)",
+        example=False
+    )
+
+    # Building options
+    include_buildings: bool = Field(
+        False,
+        description="Include buildings from CityGML",
+        example=False
+    )
+
+    # Railway options
+    include_railways: bool = Field(
+        False,
+        description="Include railways from OpenStreetMap",
+        example=False
+    )
+
+    # Bridge options
+    include_bridges: bool = Field(
+        False,
+        description="Include bridges from OpenStreetMap",
+        example=False
+    )
+
+    # Satellite imagery options
+    include_satellite_overlay: bool = Field(
+        False,
+        description="Include satellite imagery texture overlay (SWISSIMAGE)",
+        example=False
+    )
+    embed_imagery: bool = Field(
+        True,
+        description="Embed imagery in IFC file (default: True)",
+        example=True
+    )
+    imagery_resolution: float = Field(
+        0.5,
+        gt=0,
+        le=2.0,
+        description="Imagery resolution in meters per pixel (default: 0.5)",
+        example=0.5
+    )
+    imagery_year: Optional[str] = Field(
+        None,
+        description="Year for historical imagery (e.g., '2020'), default: 'current'",
+        example=None
+    )
+    export_gltf: Optional[bool] = Field(
+        None,
+        description="Export glTF/GLB file alongside IFC (default: auto-enable when imagery enabled)",
+        example=None
+    )
+    apply_texture_to_buildings: Optional[bool] = Field(
+        None,
+        description="Apply satellite imagery textures to buildings (default: enabled when imagery is enabled)",
+        example=None
+    )
+
     output_name: str = Field(
         "combined_terrain.ifc",
         description="Suggested filename for the generated IFC file",
@@ -150,10 +260,15 @@ class GenerateRequest(BaseModel):
                 "egrid": "CH999979659148",
                 "radius": 500.0,
                 "resolution": 10.0,
-                "densify": 0.5,
+                "densify": 2.0,
                 "attach_to_solid": False,
                 "include_terrain": True,
                 "include_site_solid": True,
+                "include_roads": True,
+                "include_forest": True,
+                "include_water": True,
+                "include_buildings": True,
+                "include_satellite_overlay": True,
                 "output_name": "combined_terrain.ifc"
             }
         }
@@ -287,16 +402,34 @@ async def _cleanup_old_jobs():
 async def _run_generation(request: GenerateRequest, output_path: str):
     return await run_in_threadpool(
         terrain_with_site.run_combined_terrain_workflow,
-        request.egrid,
-        request.center_x,
-        request.center_y,
-        request.radius,
-        request.resolution,
-        request.densify,
-        request.attach_to_solid,
-        request.include_terrain,
-        request.include_site_solid,
-        output_path,
+        egrid=request.egrid,
+        address=None,
+        center_x=request.center_x,
+        center_y=request.center_y,
+        radius=request.radius,
+        resolution=request.resolution,
+        densify=request.densify,
+        attach_to_solid=request.attach_to_solid,
+        include_terrain=request.include_terrain,
+        include_site_solid=request.include_site_solid,
+        include_roads=request.include_roads,
+        include_forest=request.include_forest,
+        include_water=request.include_water,
+        include_buildings=request.include_buildings,
+        include_railways=request.include_railways,
+        include_bridges=request.include_bridges,
+        road_buffer_m=request.road_buffer_m,
+        road_recess_depth=request.road_recess_depth,
+        forest_spacing=request.forest_spacing,
+        forest_threshold=request.forest_threshold,
+        embed_roads_in_terrain=request.embed_roads_in_terrain,
+        output_path=output_path,
+        include_satellite_overlay=request.include_satellite_overlay,
+        embed_imagery=request.embed_imagery,
+        imagery_resolution=request.imagery_resolution,
+        imagery_year=request.imagery_year,
+        export_gltf=request.export_gltf,
+        apply_texture_to_buildings=request.apply_texture_to_buildings,
     )
 
 
@@ -372,6 +505,7 @@ async def generate_file(request: Request, body: GenerateRequest):
 
 
 async def _execute_job(job_id: str, request: GenerateRequest):
+    print(f"\n[Job {job_id}] Starting job execution for EGRID {request.egrid}")
     async with job_lock:
         job = jobs[job_id]
         job.status = "running"
@@ -381,11 +515,17 @@ async def _execute_job(job_id: str, request: GenerateRequest):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".ifc", dir=tmpdir)
     tmp_path = tmp.name
     tmp.close()
+    print(f"[Job {job_id}] Temporary file created: {tmp_path}")
 
     try:
         await _run_generation(request, tmp_path)
+        print(f"[Job {job_id}] Generation completed successfully")
     except Exception as exc:
         detail = _map_exception_to_http(exc).detail
+        print(f"[Job {job_id}] FAILED with error: {detail}")
+        print(f"[Job {job_id}] Exception type: {type(exc).__name__}")
+        import traceback
+        traceback.print_exc()
         async with job_lock:
             job = jobs[job_id]
             job.status = "failed"
@@ -399,6 +539,7 @@ async def _execute_job(job_id: str, request: GenerateRequest):
         job.status = "completed"
         job.path = tmp_path
         job.finished_at = time.time()
+    print(f"[Job {job_id}] Job marked as completed, file available at {tmp_path}")
 
 
 @app.post(
@@ -453,6 +594,13 @@ async def job_status(job_id: str):
             response["output_name"] = job.output_name
         if job.error:
             response["error"] = job.error
+        # Add helpful debugging info
+        if job.status == "completed" and not download_available:
+            if not job.path:
+                response["debug_info"] = "Job completed but path is None"
+            elif not os.path.exists(job.path):
+                response["debug_info"] = f"Job completed but file doesn't exist: {job.path}"
+        print(f"[Job {job_id}] Status check: {job.status}, path={job.path}, error={job.error}")
     return JSONResponse(response)
 
 
