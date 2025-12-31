@@ -86,10 +86,12 @@ class SwissTreeLoader:
         }
         
         try:
+            print(f"  Querying forest API for bounds {bounds}...")
             response = self.session.get(REST_API_URL, params=params, timeout=30)
             response.raise_for_status()
+            print(f"  Forest API query completed")
             data = response.json()
-            
+
             results = data.get("results", [])
             print(f"  Found {len(results)} tree/hedge features via REST API")
             

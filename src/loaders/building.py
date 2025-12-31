@@ -64,12 +64,12 @@ class CityGMLBuildingLoader:
     STAC_BASE = "https://data.geo.admin.ch/api/stac/v1"
     COLLECTION = "ch.swisstopo.swissbuildings3d_3_0"
     
-    def __init__(self, timeout: int = 120):
+    def __init__(self, timeout: int = 30):
         """
         Initialize CityGML loader
-        
+
         Args:
-            timeout: Request timeout in seconds
+            timeout: Request timeout in seconds (default: 30s for web API compatibility)
         """
         self.timeout = timeout
         self.transformer = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
@@ -77,15 +77,17 @@ class CityGMLBuildingLoader:
     def get_buildings_in_bbox(
         self,
         bbox_2056: Tuple[float, float, float, float],
-        max_tiles: int = 1
+        max_tiles: int = 1,
+        max_buildings: Optional[int] = None
     ) -> List[CityGMLBuilding]:
         """
         Get complete 3D buildings in bounding box from CityGML tiles
-        
+
         Args:
             bbox_2056: Bounding box (min_x, min_y, max_x, max_y) in EPSG:2056
             max_tiles: Maximum number of tiles to process
-            
+            max_buildings: Maximum number of buildings to parse (None = unlimited)
+
         Returns:
             List of CityGMLBuilding objects with complete 3D geometry
         """
@@ -102,9 +104,12 @@ class CityGMLBuildingLoader:
         # We only process max_tiles (typically 1), but need extras to find one with CityGML/GDB
         query_limit = max(max_tiles * 3, 3)
         params = {'bbox': ','.join(map(str, bbox_wgs84)), 'limit': query_limit}
-        
+
+        logger.info(f"Querying STAC API: {url} (timeout: {self.timeout}s)")
+        print(f"  Querying building tiles from STAC API...")
         response = requests.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
+        print(f"  STAC query completed")
         
         tiles = response.json().get('features', [])
         if not tiles:
@@ -122,18 +127,26 @@ class CityGMLBuildingLoader:
             logger.info(f"Found {len(tiles)} tiles but none have CityGML assets - trying GDB fallback")
             # Fall back to GDB parsing for regions without CityGML (e.g., Geneva, Lausanne 2020+)
             return self._get_buildings_from_gdb(tiles, bbox_2056, max_tiles)
-        
-        logger.info(f"Found {len(citygml_tiles)} CityGML tiles (of {len(tiles)} total), processing up to {max_tiles}...")
-        
+
+        limit_msg = f" (limiting to {max_buildings} buildings)" if max_buildings else ""
+        logger.info(f"Found {len(citygml_tiles)} CityGML tiles (of {len(tiles)} total), processing up to {max_tiles}{limit_msg}...")
+        if max_buildings:
+            print(f"  Limiting to first {max_buildings} buildings for performance")
+
         all_buildings = []
         processed_count = 0
         citygml_failed = False
-        
+
         for tile in citygml_tiles:
             if processed_count >= max_tiles:
                 break
+            # Stop if we've reached the building limit
+            if max_buildings and len(all_buildings) >= max_buildings:
+                logger.info(f"Reached building limit of {max_buildings}, stopping tile processing")
+                break
             try:
-                buildings = self._process_tile(tile, bbox_2056)
+                remaining = max_buildings - len(all_buildings) if max_buildings else None
+                buildings = self._process_tile(tile, bbox_2056, max_buildings=remaining)
                 all_buildings.extend(buildings)
                 processed_count += 1
                 logger.info(f"Processed tile {processed_count}/{min(len(citygml_tiles), max_tiles)}: {len(buildings)} buildings")
@@ -153,15 +166,17 @@ class CityGMLBuildingLoader:
     def _process_tile(
         self,
         tile: Dict,
-        bbox_2056: Tuple[float, float, float, float]
+        bbox_2056: Tuple[float, float, float, float],
+        max_buildings: Optional[int] = None
     ) -> List[CityGMLBuilding]:
         """
         Download and parse a CityGML tile
-        
+
         Args:
             tile: STAC tile feature
             bbox_2056: Target bounding box for filtering
-            
+            max_buildings: Maximum number of buildings to parse (None = unlimited)
+
         Returns:
             List of buildings in the target area
         """
@@ -178,10 +193,13 @@ class CityGMLBuildingLoader:
         # Download and extract
         with tempfile.TemporaryDirectory() as tmpdir:
             zip_path = os.path.join(tmpdir, 'buildings.zip')
-            
+
+            logger.info(f"Downloading CityGML tile: {citygml_url[:80]}... (timeout: {self.timeout}s)")
+            print(f"    Downloading CityGML tile...")
             response = requests.get(citygml_url, timeout=self.timeout, stream=True)
             response.raise_for_status()
-            
+
+            print(f"    Extracting tile data...")
             with open(zip_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
@@ -226,62 +244,88 @@ class CityGMLBuildingLoader:
             
             if not gml_file:
                 raise ValueError("No GML file found in extracted archive")
-            
+
             # Parse CityGML
-            return self._parse_citygml(gml_file, bbox_2056)
+            print(f"    Parsing CityGML file...")
+            return self._parse_citygml(gml_file, bbox_2056, max_buildings=max_buildings)
     
     def _parse_citygml(
         self,
         gml_path: str,
-        bbox_2056: Tuple[float, float, float, float]
+        bbox_2056: Tuple[float, float, float, float],
+        max_buildings: Optional[int] = None
     ) -> List[CityGMLBuilding]:
         """
         Parse CityGML file and extract buildings with lod2Solid
-        
+
         Args:
             gml_path: Path to CityGML file
             bbox_2056: Bounding box for filtering (EPSG:2056)
-            
+            max_buildings: Maximum number of buildings to parse (None = unlimited)
+
         Returns:
             List of CityGMLBuilding objects
         """
-        tree = safe_parse(gml_path)
-        root = tree.getroot()
-        
+        # Use iterative parsing to STOP READING the file after max_buildings
+        # This is CRITICAL - prevents loading entire 40MB XML into memory
+        import xml.etree.ElementTree as ET
+
         # Define namespaces
         ns = {
             'bldg': 'http://www.opengis.net/citygml/building/2.0',
             'gml': 'http://www.opengis.net/gml',
             'gen': 'http://www.opengis.net/citygml/generics/2.0'
         }
-        
-        all_buildings_elem = root.findall('.//bldg:Building', ns)
-        logger.debug(f"Found {len(all_buildings_elem)} buildings in CityGML file")
-        
+
         target_box = box(*bbox_2056)
         buildings = []
-        
-        for b_elem in all_buildings_elem:
+        buildings_processed = 0
+
+        # Stream through XML file - only reads what we need
+        context = ET.iterparse(gml_path, events=('end',))
+
+        for event, elem in context:
+            # Check if this is a Building element
+            if elem.tag != '{http://www.opengis.net/citygml/building/2.0}Building':
+                # Clear non-building elements immediately to save memory
+                elem.clear()
+                continue
+
+            buildings_processed += 1
+
+            # CRITICAL: Stop reading XML file after limit
+            # This breaks the iterparse loop and stops file I/O
+            if max_buildings and len(buildings) >= max_buildings:
+                logger.info(f"Reached building limit of {max_buildings} (processed {buildings_processed} building elements), stopping XML parse")
+                print(f"    Stopped at {max_buildings} buildings (processed {buildings_processed} elements)")
+                elem.clear()
+                break
+
+            # Process this Building element
+            b_elem = elem
+
             # Check for lod2Solid
             lod2solid = b_elem.find('.//bldg:lod2Solid', ns)
             if lod2solid is None:
+                elem.clear()
                 continue
-            
+
             solid = lod2solid.find('.//gml:Solid', ns)
             if solid is None:
+                elem.clear()
                 continue
-            
+
             bldg_id = b_elem.get('{http://www.opengis.net/gml}id', 'unknown')
-            
+
             # Extract attributes
             dach_max = b_elem.find('.//gen:doubleAttribute[@name="DACH_MAX"]/gen:value', ns)
             dach_min = b_elem.find('.//gen:doubleAttribute[@name="DACH_MIN"]/gen:value', ns)
             objektart = b_elem.find('.//gen:stringAttribute[@name="OBJEKTART"]/gen:value', ns)
-            
+
             height_max = float(dach_max.text) if dach_max is not None else None
             height_min = float(dach_min.text) if dach_min is not None else None
             building_type = objektart.text if objektart is not None else None
-            
+
             # Extract all attributes
             attrs = {}
             for attr in b_elem.findall('.//gen:*', ns):
@@ -289,51 +333,54 @@ class CityGMLBuildingLoader:
                 value_elem = attr.find('gen:value', ns)
                 if name and value_elem is not None:
                     attrs[name] = value_elem.text
-            
+
             # Extract geometry faces
             faces_data = []
             all_points = []
-            
+
             comp_surface = solid.find('.//gml:CompositeSurface', ns)
             if comp_surface is None:
+                elem.clear()
                 continue
-            
+
             for surf_member in comp_surface.findall('.//gml:surfaceMember', ns):
                 polygon = surf_member.find('.//gml:Polygon', ns)
                 if polygon is None:
                     continue
-                
+
                 poslist = polygon.find('.//gml:posList', ns)
                 if poslist is None:
                     continue
-                
+
                 coords_text = poslist.text.strip()
                 coords_list = [float(x) for x in coords_text.split()]
-                
+
                 # Group into XYZ triples
-                points = [(coords_list[i], coords_list[i+1], coords_list[i+2]) 
+                points = [(coords_list[i], coords_list[i+1], coords_list[i+2])
                          for i in range(0, len(coords_list), 3)]
-                
+
                 if len(points) >= 3:
                     faces_data.append(points)
                     all_points.extend(points)
-            
+
             if not faces_data:
+                elem.clear()
                 continue
-            
+
             # Calculate bounding box and centroid
             xs = [p[0] for p in all_points]
             ys = [p[1] for p in all_points]
             zs = [p[2] for p in all_points]
-            
+
             centroid_x = sum(xs) / len(xs)
             centroid_y = sum(ys) / len(ys)
-            
+
             # Check if building intersects target area
             building_bbox = box(min(xs), min(ys), max(xs), max(ys))
             if not target_box.intersects(building_bbox):
+                elem.clear()
                 continue
-            
+
             buildings.append(CityGMLBuilding(
                 id=bldg_id,
                 faces=faces_data,
@@ -345,7 +392,10 @@ class CityGMLBuildingLoader:
                 z_max=max(zs),
                 attributes=attrs
             ))
-        
+
+            # Clear this building element from memory now that we're done with it
+            elem.clear()
+
         return buildings
     
     def _get_buildings_from_gdb(

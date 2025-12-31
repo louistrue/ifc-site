@@ -28,3 +28,6 @@ requests-cache==1.2.0
 
 # glTF export
 trimesh==4.10.1
+
+# Image processing (required by water loader and imagery processing)
+Pillow==11.0.0
