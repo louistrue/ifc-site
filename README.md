@@ -2,6 +2,10 @@
 
 Convert Swiss cadastral parcels into comprehensive 3D IFC (Industry Foundation Classes) models with terrain, site boundaries, and buildings. Fetches data from Swiss geo.admin.ch APIs and generates georeferenced IFC files for BIM applications.
 
+<p align="center">
+  <img src="docs/assets/demo.gif" width="100%" alt="Swiss Site Boundaries Demo">
+</p>
+
 ## Features
 
 - **Cadastral boundaries** - Fetch Swiss parcels via EGRID from geo.admin.ch
