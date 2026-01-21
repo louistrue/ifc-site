@@ -25,16 +25,24 @@ import { createJob, GenerateRequest } from '@/lib/api'
 
 // Interesting Swiss locations for Lucky Draw (using addresses that get resolved to real EGRIDs)
 const LUCKY_LOCATIONS = [
+  // Famous landmarks
   { address: 'Bundesplatz 3, Bern', name: 'Bundeshaus, Bern', desc: 'Federal Palace' },
   { address: 'Rämistrasse 101, Zürich', name: 'ETH Zurich', desc: 'Technical University' },
-  { address: 'Bahnhofplatz 15, Zürich', name: 'Zurich HB', desc: 'Main Station' },
-  { address: 'Quai Gustave-Ador 42, Genève', name: 'Jet d\'Eau, Geneva', desc: 'Famous Fountain' },
-  { address: 'Kapellplatz 1, Luzern', name: 'Luzern Altstadt', desc: 'Chapel Square' },
-  { address: 'Centralbahnplatz 1, Basel', name: 'Basel SBB', desc: 'Train Station' },
-  { address: 'Place de la Cathédrale, Lausanne', name: 'Lausanne Cathedral', desc: 'Gothic Cathedral' },
-  { address: 'Kramgasse 49, Bern', name: 'Einstein House, Bern', desc: 'Historic Old Town' },
-  { address: 'Münsterhof 1, Zürich', name: 'Fraumünster, Zurich', desc: 'Historic Church' },
-  { address: 'Piazza della Riforma 1, Lugano', name: 'Lugano Centro', desc: 'Piazza della Riforma' },
+  { address: 'Kapellplatz 1, Luzern', name: 'Chapel Bridge Area', desc: 'Medieval Covered Bridge' },
+  { address: 'Münsterhof 1, Zürich', name: 'Fraumünster', desc: 'Chagall Windows Church' },
+  // Easter eggs - fun places
+  { address: 'Toblerone 1, Bern-Brünnen', name: 'Toblerone HQ', desc: 'Where chocolate dreams come true' },
+  { address: 'Schokoladenweg 1, Kilchberg', name: 'Lindt Home', desc: 'Chocolate Heaven' },
+  { address: 'Victorinoxstrasse 1, Ibach', name: 'Swiss Army Knife', desc: 'MacGyver\'s Workshop' },
+  { address: 'Bahnhofstrasse 1, Zürich', name: 'Rich Street', desc: 'Most expensive real estate' },
+  { address: 'Dufourstrasse 50, St. Gallen', name: 'Textile Museum', desc: 'Where fashion was born' },
+  { address: 'Casino-Platz 1, Montreux', name: 'Montreux Casino', desc: 'Smoke on the Water' },
+  { address: 'Quai du Mont-Blanc 30, Genève', name: 'Beau-Rivage', desc: 'Where history happened' },
+  { address: 'Marktgasse 1, Bern', name: 'Zytglogge Area', desc: 'Einstein\'s Clock Tower' },
+  // Hidden gems
+  { address: 'Creux du Van, Val-de-Travers', name: 'Swiss Canyon', desc: 'Mini Grand Canyon' },
+  { address: 'Via Nassa 1, Lugano', name: 'Lugano Centro', desc: 'Mediterranean Vibes' },
+  { address: 'Rathausplatz 1, Stein am Rhein', name: 'Painted Town', desc: 'Frescos Everywhere' },
 ]
 
 interface FormState {
@@ -63,6 +71,27 @@ interface ActiveJob {
   name?: string
 }
 
+// Limits to prevent abuse
+const LIMITS = {
+  MAX_RADIUS: 500,       // Max 500m radius
+  MIN_RADIUS: 50,        // Min 50m radius
+  MAX_RESOLUTION: 25,    // Coarsest resolution (larger number = fewer points)
+  MIN_RESOLUTION: 5,     // Finest resolution (smaller number = more points)
+  MAX_FEATURES: 4,       // Max features at once to limit processing
+}
+
+// Calculate adaptive resolution based on radius (larger area = coarser resolution)
+function getAdaptiveResolution(radius: number): number {
+  // For radius 50-150m: resolution 5m (fine detail)
+  // For radius 150-300m: resolution 10m (medium detail)
+  // For radius 300-500m: resolution 15-25m (coarse, scales with size)
+  if (radius <= 150) return 5
+  if (radius <= 300) return 10
+  // Linear interpolation from 15m to 25m for 300-500m radius
+  const scale = (radius - 300) / 200
+  return Math.round(15 + scale * 10)
+}
+
 const defaultState: FormState = {
   egrid: '',
   address: '',
@@ -76,8 +105,8 @@ const defaultState: FormState = {
   includeBridges: false,
   includeSatellite: false,
   exportGltf: false,
-  radius: 500,
-  resolution: 10,
+  radius: 200,           // Sensible default
+  resolution: 10,        // Medium resolution
   outputName: 'site_model.ifc',
 }
 
@@ -89,24 +118,63 @@ export default function GeneratorForm() {
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([])
   const [luckyPick, setLuckyPick] = useState<typeof LUCKY_LOCATIONS[0] | null>(null)
 
+  // Count active optional features (excludes terrain and site solid which are lightweight)
+  const countActiveFeatures = (state: FormState): number => {
+    return [
+      state.includeRoads,
+      state.includeBuildings,
+      state.includeForest,
+      state.includeWater,
+      state.includeRailways,
+      state.includeSatellite,
+    ].filter(Boolean).length
+  }
+
   const updateForm = <K extends keyof FormState>(key: K, value: FormState[K]) => {
-    setForm((prev) => ({ ...prev, [key]: value }))
+    setForm((prev) => {
+      let updated = { ...prev, [key]: value }
+
+      // Apply adaptive resolution when radius changes
+      if (key === 'radius' && typeof value === 'number') {
+        updated.resolution = getAdaptiveResolution(value)
+      }
+
+      // Limit feature count - disable oldest enabled feature if limit exceeded
+      const featureKeys: (keyof FormState)[] = [
+        'includeRoads', 'includeBuildings', 'includeForest',
+        'includeWater', 'includeRailways', 'includeSatellite'
+      ]
+      if (featureKeys.includes(key) && value === true) {
+        const activeCount = countActiveFeatures(updated)
+        if (activeCount > LIMITS.MAX_FEATURES) {
+          // Don't allow enabling more features - revert
+          updated[key] = false as FormState[K]
+          setError(`Maximum ${LIMITS.MAX_FEATURES} features at once to ensure fast generation`)
+          setTimeout(() => setError(null), 3000)
+        }
+      }
+
+      return updated
+    })
+
     if (key === 'egrid') {
       setLuckyPick(null) // Clear lucky pick when manually editing
       setForm((prev) => ({ ...prev, address: '' })) // Clear address when using manual EGRID
     }
   }
 
-  const enableAll = () => {
+  const enableRecommended = () => {
+    // Enable a sensible set that fits within limits
     setForm((prev) => ({
       ...prev,
       includeRoads: true,
       includeBuildings: true,
       includeForest: true,
       includeWater: true,
-      includeRailways: true,
-      includeSatellite: true,
-      exportGltf: true,
+      // Leave railways and satellite off to stay within limit
+      includeRailways: false,
+      includeSatellite: false,
+      exportGltf: false,
     }))
   }
 
@@ -261,14 +329,21 @@ export default function GeneratorForm() {
             <div className="flex items-center gap-2">
               <Settings2 size={18} className="text-sketch-gray" />
               <h3 className="font-mono font-medium">Features</h3>
+              <span className={`text-[10px] px-2 py-0.5 border ${
+                countActiveFeatures(form) >= LIMITS.MAX_FEATURES
+                  ? 'border-red-400 bg-red-50 text-red-600'
+                  : 'border-sketch-gray bg-sketch-pale text-sketch-gray'
+              }`}>
+                {countActiveFeatures(form)}/{LIMITS.MAX_FEATURES}
+              </span>
             </div>
             <button
               type="button"
-              onClick={enableAll}
+              onClick={enableRecommended}
               className="flex items-center gap-1 text-xs font-mono text-sketch-gray hover:text-sketch-black transition-colors"
             >
               <Sparkles size={14} />
-              Enable all
+              Recommended
             </button>
           </div>
 
@@ -361,6 +436,12 @@ export default function GeneratorForm() {
                 className="overflow-hidden"
               >
                 <div className="pt-4 space-y-4">
+                  {/* Info box */}
+                  <div className="p-3 bg-sketch-pale border border-sketch-gray text-xs text-sketch-gray">
+                    Resolution adapts automatically to radius for optimal performance.
+                    Larger areas use coarser resolution to keep file sizes manageable.
+                  </div>
+
                   {/* Radius */}
                   <div>
                     <div className="flex justify-between mb-2">
@@ -369,30 +450,34 @@ export default function GeneratorForm() {
                     </div>
                     <input
                       type="range"
-                      min="100"
-                      max="2000"
-                      step="50"
+                      min={LIMITS.MIN_RADIUS}
+                      max={LIMITS.MAX_RADIUS}
+                      step="25"
                       value={form.radius}
                       onChange={(e) => updateForm('radius', Number(e.target.value))}
                       className="w-full"
                     />
+                    <div className="flex justify-between text-[10px] text-sketch-gray mt-1">
+                      <span>{LIMITS.MIN_RADIUS}m</span>
+                      <span>{LIMITS.MAX_RADIUS}m max</span>
+                    </div>
                   </div>
 
-                  {/* Resolution */}
+                  {/* Resolution - read-only, set by adaptive logic */}
                   <div>
                     <div className="flex justify-between mb-2">
-                      <label className="tech-label">Resolution</label>
+                      <label className="tech-label">Resolution (auto)</label>
                       <span className="font-mono text-sm">{form.resolution}m</span>
                     </div>
-                    <input
-                      type="range"
-                      min="5"
-                      max="50"
-                      step="5"
-                      value={form.resolution}
-                      onChange={(e) => updateForm('resolution', Number(e.target.value))}
-                      className="w-full"
-                    />
+                    <div className="h-2 bg-sketch-pale border border-sketch-gray relative">
+                      <div
+                        className="absolute inset-y-0 left-0 bg-sketch-black"
+                        style={{ width: `${((form.resolution - LIMITS.MIN_RESOLUTION) / (LIMITS.MAX_RESOLUTION - LIMITS.MIN_RESOLUTION)) * 100}%` }}
+                      />
+                    </div>
+                    <p className="text-[10px] text-sketch-gray mt-1">
+                      {form.resolution <= 5 ? 'Fine detail' : form.resolution <= 10 ? 'Medium detail' : 'Optimized for large area'}
+                    </p>
                   </div>
 
                   {/* Output Name */}
