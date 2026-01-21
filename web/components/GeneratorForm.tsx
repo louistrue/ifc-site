@@ -19,6 +19,7 @@ import {
   Dices,
   Plus,
   CheckCircle2,
+  Zap,
 } from 'lucide-react'
 import FeatureToggle from './FeatureToggle'
 import JobTracker from './JobTracker'
@@ -283,34 +284,65 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
     setActiveJobs((prev) => prev.filter((j) => j.id !== jobId))
   }
 
+  // Common card class for secret mode
+  const cardClass = secretMode
+    ? 'sketch-card border-2 border-purple-400 bg-gradient-to-br from-purple-50/50 to-pink-50/50'
+    : 'sketch-card'
+
   return (
     <div className="space-y-8">
+      {/* Secret Mode Banner */}
+      <AnimatePresence>
+        {secretMode && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-gradient-to-r from-purple-600 via-pink-600 to-purple-600 text-white p-4 text-center"
+          >
+            <div className="flex items-center justify-center gap-3">
+              <Sparkles size={20} className="animate-pulse" />
+              <span className="font-mono font-bold">SECRET MODE ACTIVATED</span>
+              <Sparkles size={20} className="animate-pulse" />
+            </div>
+            <p className="text-purple-200 text-xs mt-1">
+              Toblerone HQ selected · All features enabled · Maximum detail
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Form */}
       <form onSubmit={handleSubmit} className="space-y-8">
         {/* Location Section */}
-        <section className={`sketch-card ${secretMode ? 'border-purple-400 border-2' : ''}`}>
+        <section className={cardClass}>
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
-              <MapPin size={18} className="text-sketch-gray" />
+              <MapPin size={18} className={secretMode ? 'text-purple-600' : 'text-sketch-gray'} />
               <h3 className="font-mono font-medium">Location</h3>
               {secretMode && (
                 <motion.span
                   initial={{ scale: 0 }}
-                  animate={{ scale: 1 }}
+                  animate={{ scale: [1, 1.1, 1] }}
+                  transition={{ repeat: Infinity, duration: 2 }}
                   className="text-[10px] px-2 py-0.5 bg-gradient-to-r from-purple-500 to-pink-500 text-white"
                 >
-                  SECRET MODE
+                  LOCKED IN
                 </motion.span>
               )}
             </div>
             <button
               type="button"
               onClick={luckyDraw}
-              className="sketch-btn py-2 px-3 flex items-center gap-2 text-xs hover:rotate-3 transition-transform"
-              title="Try your luck with a random Swiss location!"
+              disabled={secretMode}
+              className={`py-2 px-3 flex items-center gap-2 text-xs transition-transform ${
+                secretMode
+                  ? 'bg-purple-100 border border-purple-300 text-purple-600 cursor-not-allowed'
+                  : 'sketch-btn hover:rotate-3'
+              }`}
+              title={secretMode ? 'Secret location selected!' : 'Try your luck with a random Swiss location!'}
             >
-              <Dices size={14} className="hover:animate-bounce" />
-              Lucky Draw
+              <Dices size={14} />
+              {secretMode ? 'Secret Location' : 'Lucky Draw'}
             </button>
           </div>
 
@@ -360,27 +392,36 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
         </section>
 
         {/* Features Grid */}
-        <section className="sketch-card">
+        <section className={cardClass}>
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
-              <Settings2 size={18} className="text-sketch-gray" />
+              <Settings2 size={18} className={secretMode ? 'text-purple-600' : 'text-sketch-gray'} />
               <h3 className="font-mono font-medium">Features</h3>
-              <span className={`text-[10px] px-2 py-0.5 border ${
-                countActiveFeatures(form) >= LIMITS.MAX_FEATURES
-                  ? 'border-red-400 bg-red-50 text-red-600'
-                  : 'border-sketch-gray bg-sketch-pale text-sketch-gray'
-              }`}>
-                {countActiveFeatures(form)}/{LIMITS.MAX_FEATURES}
-              </span>
+              {secretMode ? (
+                <span className="text-[10px] px-2 py-0.5 bg-gradient-to-r from-purple-500 to-pink-500 text-white flex items-center gap-1">
+                  <Zap size={10} />
+                  MAX POWER
+                </span>
+              ) : (
+                <span className={`text-[10px] px-2 py-0.5 border ${
+                  countActiveFeatures(form) >= LIMITS.MAX_FEATURES
+                    ? 'border-red-400 bg-red-50 text-red-600'
+                    : 'border-sketch-gray bg-sketch-pale text-sketch-gray'
+                }`}>
+                  {countActiveFeatures(form)}/{LIMITS.MAX_FEATURES}
+                </span>
+              )}
             </div>
-            <button
-              type="button"
-              onClick={enableRecommended}
-              className="flex items-center gap-1 text-xs font-mono text-sketch-gray hover:text-sketch-black transition-colors"
-            >
-              <Sparkles size={14} />
-              Recommended
-            </button>
+            {!secretMode && (
+              <button
+                type="button"
+                onClick={enableRecommended}
+                className="flex items-center gap-1 text-xs font-mono text-sketch-gray hover:text-sketch-black transition-colors"
+              >
+                <Sparkles size={14} />
+                Recommended
+              </button>
+            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -444,21 +485,26 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
         </section>
 
         {/* Advanced Settings */}
-        <section className="sketch-card">
+        <section className={cardClass}>
           <button
             type="button"
             onClick={() => setShowAdvanced(!showAdvanced)}
             className="w-full flex items-center justify-between"
           >
             <div className="flex items-center gap-2">
-              <Settings2 size={18} className="text-sketch-gray" />
+              <Settings2 size={18} className={secretMode ? 'text-purple-600' : 'text-sketch-gray'} />
               <h3 className="font-mono font-medium">Advanced Settings</h3>
+              {secretMode && (
+                <span className="text-[10px] px-2 py-0.5 bg-purple-100 text-purple-600 border border-purple-300">
+                  2m DETAIL
+                </span>
+              )}
             </div>
             <motion.div
               animate={{ rotate: showAdvanced ? 180 : 0 }}
               transition={{ duration: 0.2 }}
             >
-              <ChevronDown size={20} className="text-sketch-gray" />
+              <ChevronDown size={20} className={secretMode ? 'text-purple-600' : 'text-sketch-gray'} />
             </motion.div>
           </button>
 

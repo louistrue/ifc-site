@@ -34,11 +34,15 @@ const SECRET_SEQUENCE = ['terrain', 'water', 'forest', 'imagery']
 
 export default function Home() {
   const [clickSequence, setClickSequence] = useState<string[]>([])
-  const [secretUnlocked, setSecretUnlocked] = useState(false)
+  const [secretModeActive, setSecretModeActive] = useState(false)
+  const [showCelebration, setShowCelebration] = useState(false)
   const [showSecretHint, setShowSecretHint] = useState(false)
   const [lastClickedFeature, setLastClickedFeature] = useState<string | null>(null)
 
   const handleFeatureClick = useCallback((key: string) => {
+    // Don't allow re-triggering if already in secret mode
+    if (secretModeActive) return
+
     setLastClickedFeature(key)
 
     // Reset hint display
@@ -61,14 +65,14 @@ export default function Home() {
 
       // Check if complete
       if (newSeq.length === SECRET_SEQUENCE.length) {
-        setSecretUnlocked(true)
-        // Celebration!
+        setSecretModeActive(true) // Stays true forever
+        setShowCelebration(true) // Modal can be dismissed
         return []
       }
 
       return newSeq
     })
-  }, [])
+  }, [secretModeActive])
 
   return (
     <div className="min-h-screen">
@@ -76,13 +80,13 @@ export default function Home() {
 
       {/* Secret mode celebration overlay */}
       <AnimatePresence>
-        {secretUnlocked && (
+        {showCelebration && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
-            onClick={() => setSecretUnlocked(false)}
+            onClick={() => setShowCelebration(false)}
           >
             <motion.div
               initial={{ scale: 0, rotate: -180 }}
@@ -189,36 +193,59 @@ export default function Home() {
               <div className="flex flex-wrap gap-2 mb-6">
                 {features.map((f, i) => {
                   const isInSequence = clickSequence.includes(f.key)
-                  const isNextInSequence = SECRET_SEQUENCE[clickSequence.length] === f.key
 
                   return (
                     <motion.button
                       key={f.label}
                       onClick={() => handleFeatureClick(f.key)}
-                      className={`flex items-center gap-2 px-3 py-1.5 border transition-all cursor-pointer ${
-                        isInSequence
-                          ? 'bg-purple-100 border-purple-400 text-purple-700'
+                      className={`flex items-center gap-2 px-3 py-1.5 border transition-all ${
+                        secretModeActive
+                          ? 'bg-gradient-to-r from-purple-100 to-pink-100 border-purple-400 text-purple-700 cursor-default'
+                          : isInSequence
+                          ? 'bg-purple-100 border-purple-400 text-purple-700 cursor-pointer'
                           : lastClickedFeature === f.key
-                          ? 'bg-sketch-black text-white border-sketch-black'
-                          : 'bg-sketch-white border-sketch-pale hover:border-sketch-gray hover:bg-sketch-paper'
+                          ? 'bg-sketch-black text-white border-sketch-black cursor-pointer'
+                          : 'bg-sketch-white border-sketch-pale hover:border-sketch-gray hover:bg-sketch-paper cursor-pointer'
                       }`}
                       initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: 0.3 + i * 0.05 }}
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
+                      animate={{
+                        opacity: 1,
+                        y: 0,
+                        scale: secretModeActive ? [1, 1.05, 1] : 1,
+                      }}
+                      transition={{
+                        delay: secretModeActive ? i * 0.05 : 0.3 + i * 0.05,
+                        scale: { duration: 0.3 }
+                      }}
+                      whileHover={secretModeActive ? {} : { scale: 1.05 }}
+                      whileTap={secretModeActive ? {} : { scale: 0.95 }}
                       title={f.desc}
                     >
-                      <f.icon size={14} className={isInSequence ? 'text-purple-600' : 'text-sketch-gray'} />
+                      <f.icon size={14} className={secretModeActive || isInSequence ? 'text-purple-600' : 'text-sketch-gray'} />
                       <span className="text-xs font-mono">{f.label}</span>
                     </motion.button>
                   )
                 })}
               </div>
 
+              {/* Secret mode active badge */}
+              <AnimatePresence>
+                {secretModeActive && (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className="mb-4 inline-flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-purple-600 to-pink-600 text-white text-xs font-mono"
+                  >
+                    <Sparkles size={14} className="animate-pulse" />
+                    SECRET MODE ACTIVE
+                    <Sparkles size={14} className="animate-pulse" />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               {/* Secret hint */}
               <AnimatePresence>
-                {showSecretHint && (
+                {!secretModeActive && showSecretHint && (
                   <motion.p
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -228,7 +255,7 @@ export default function Home() {
                     Hmm, there&apos;s a pattern here... try again from the ground up!
                   </motion.p>
                 )}
-                {clickSequence.length > 0 && clickSequence.length < SECRET_SEQUENCE.length && (
+                {!secretModeActive && clickSequence.length > 0 && clickSequence.length < SECRET_SEQUENCE.length && (
                   <motion.p
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
@@ -241,12 +268,16 @@ export default function Home() {
 
               <motion.a
                 href="#generator"
-                className="inline-flex items-center gap-2 sketch-btn-primary"
+                className={`inline-flex items-center gap-2 ${
+                  secretModeActive
+                    ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white px-6 py-3 font-mono font-medium hover:from-purple-700 hover:to-pink-700 transition-all shadow-lg'
+                    : 'sketch-btn-primary'
+                }`}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ delay: 0.6 }}
               >
-                Start Generating
+                {secretModeActive ? 'Generate Secret Model' : 'Start Generating'}
                 <ArrowDown size={16} />
               </motion.a>
             </motion.div>
@@ -556,7 +587,7 @@ export default function Home() {
             </p>
           </motion.div>
 
-          <GeneratorForm secretMode={secretUnlocked} />
+          <GeneratorForm secretMode={secretModeActive} />
         </div>
       </section>
 
