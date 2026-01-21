@@ -68,7 +68,14 @@ export default function JobTracker({ jobId, onComplete, onError }: JobTrackerPro
           setPolling(false)
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to get status')
+        const message = err instanceof Error ? err.message : 'Failed to get status'
+        // Handle job not found (e.g., after server restart)
+        if (message.includes('404') || message.toLowerCase().includes('not found')) {
+          setError('Job expired or server restarted. Please generate again.')
+          setStatus({ status: 'expired' })
+        } else {
+          setError(message)
+        }
         setPolling(false)
       }
     }
