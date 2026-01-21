@@ -1,5 +1,4 @@
-// Remove trailing slash from API URL
-const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080').replace(/\/+$/, '')
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
 
 export interface GenerateRequest {
   egrid?: string
