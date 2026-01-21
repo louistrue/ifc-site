@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   MapPin,
@@ -75,22 +75,38 @@ interface ActiveJob {
 const LIMITS = {
   MAX_RADIUS: 500,       // Max 500m radius
   MIN_RADIUS: 50,        // Min 50m radius
-  MAX_RESOLUTION: 25,    // Coarsest resolution (larger number = fewer points)
-  MIN_RESOLUTION: 5,     // Finest resolution (smaller number = more points)
-  MAX_FEATURES: 4,       // Max features at once to limit processing
+  MAX_RESOLUTION: 15,    // Coarsest resolution
+  MIN_RESOLUTION: 2,     // Finest resolution
+  MAX_FEATURES: 5,       // Max features at once
 }
 
-// Calculate adaptive resolution based on radius (larger area = coarser resolution)
+// Calculate adaptive resolution based on radius
 function getAdaptiveResolution(radius: number): number {
-  // For radius 50-150m: resolution 5m (fine detail)
-  // For radius 150-300m: resolution 10m (medium detail)
-  // For radius 300-500m: resolution 15-25m (coarse, scales with size)
-  if (radius <= 150) return 5
-  if (radius <= 300) return 10
-  // Linear interpolation from 15m to 25m for 300-500m radius
-  const scale = (radius - 300) / 200
-  return Math.round(15 + scale * 10)
+  // More generous - finer detail at all sizes
+  if (radius <= 100) return 2
+  if (radius <= 200) return 5
+  if (radius <= 350) return 8
+  return Math.round(8 + ((radius - 350) / 150) * 7)
 }
+
+// Fun loading messages - Swiss themed
+const LOADING_MESSAGES = [
+  'Summoning Swiss precision...',
+  'Consulting the mountains...',
+  'Melting chocolate for fuel...',
+  'Asking permission from cows...',
+  'Yodeling to the satellites...',
+  'Polishing the Matterhorn...',
+  'Counting cheese holes...',
+  'Winding the clockwork...',
+  'Sharpening the army knife...',
+  'Brewing fondue algorithms...',
+  'Negotiating with gnomes...',
+  'Calibrating cuckoo clocks...',
+]
+
+// Easter egg: Konami code tracker
+const KONAMI_CODE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a']
 
 const defaultState: FormState = {
   egrid: '',
@@ -117,6 +133,41 @@ export default function GeneratorForm() {
   const [error, setError] = useState<string | null>(null)
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([])
   const [luckyPick, setLuckyPick] = useState<typeof LUCKY_LOCATIONS[0] | null>(null)
+  const [loadingMsg, setLoadingMsg] = useState(LOADING_MESSAGES[0])
+  const [konamiIndex, setKonamiIndex] = useState(0)
+  const [secretMode, setSecretMode] = useState(false)
+
+  // Rotate loading message while submitting
+  useEffect(() => {
+    if (!isSubmitting) return
+    const interval = setInterval(() => {
+      setLoadingMsg(LOADING_MESSAGES[Math.floor(Math.random() * LOADING_MESSAGES.length)])
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [isSubmitting])
+
+  // Konami code easter egg
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === KONAMI_CODE[konamiIndex]) {
+        const next = konamiIndex + 1
+        if (next === KONAMI_CODE.length) {
+          setSecretMode(true)
+          setKonamiIndex(0)
+          // Auto-fill with a fun location
+          const secret = LUCKY_LOCATIONS.find(l => l.name.includes('Toblerone')) || LUCKY_LOCATIONS[0]
+          setLuckyPick(secret)
+          setForm(prev => ({ ...prev, egrid: '', address: secret.address }))
+        } else {
+          setKonamiIndex(next)
+        }
+      } else {
+        setKonamiIndex(0)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [konamiIndex])
 
   // Count active optional features (excludes terrain and site solid which are lightweight)
   const countActiveFeatures = (state: FormState): number => {
@@ -244,13 +295,19 @@ export default function GeneratorForm() {
             <div className="flex items-center gap-2">
               <MapPin size={18} className="text-sketch-gray" />
               <h3 className="font-mono font-medium">Location</h3>
+              {secretMode && (
+                <span className="text-[10px] px-2 py-0.5 bg-gradient-to-r from-purple-500 to-pink-500 text-white animate-pulse">
+                  SECRET MODE
+                </span>
+              )}
             </div>
             <button
               type="button"
               onClick={luckyDraw}
-              className="sketch-btn py-2 px-3 flex items-center gap-2 text-xs"
+              className="sketch-btn py-2 px-3 flex items-center gap-2 text-xs hover:rotate-3 transition-transform"
+              title="Try your luck with a random Swiss location!"
             >
-              <Dices size={14} />
+              <Dices size={14} className="hover:animate-bounce" />
               Lucky Draw
             </button>
           </div>
@@ -504,20 +561,25 @@ export default function GeneratorForm() {
         <button
           type="submit"
           disabled={isSubmitting}
-          className="sketch-btn-primary w-full py-4 text-base flex items-center justify-center gap-3 disabled:opacity-50"
+          className={`sketch-btn-primary w-full py-4 text-base flex items-center justify-center gap-3 disabled:opacity-50 ${secretMode ? 'bg-gradient-to-r from-purple-600 to-pink-600 border-purple-700' : ''}`}
         >
           {isSubmitting ? (
             <>
               <Loader2 size={20} className="animate-spin" />
-              Starting Generation...
+              <span className="animate-pulse">{loadingMsg}</span>
             </>
           ) : (
             <>
               <Plus size={20} />
-              Generate IFC Model
+              {secretMode ? 'Generate Secret Model' : 'Generate IFC Model'}
             </>
           )}
         </button>
+
+        {/* Subtle hint */}
+        <p className="text-center text-[10px] text-sketch-gray/50 mt-3 select-none">
+          Made with Swiss precision · v0.1 · {secretMode ? 'You found the secret!' : '↑↑↓↓←→←→BA'}
+        </p>
       </form>
 
       {/* Active Jobs - shown below form so user sees them after clicking generate */}
