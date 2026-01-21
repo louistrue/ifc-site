@@ -1,0 +1,316 @@
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --sketch-black: #1a1a1a;
+  --sketch-dark: #2d2d2d;
+  --sketch-mid: #4a4a4a;
+  --sketch-gray: #6b6b6b;
+  --sketch-light: #9a9a9a;
+  --sketch-pale: #c4c4c4;
+  --sketch-paper: #f5f5f5;
+  --sketch-white: #fafafa;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'JetBrains Mono', monospace;
+  background-color: var(--sketch-paper);
+  color: var(--sketch-black);
+  min-height: 100vh;
+}
+
+/* Sketch-style components */
+@layer components {
+  /* Hand-drawn border effect */
+  .sketch-border {
+    position: relative;
+    border: 2px solid var(--sketch-black);
+    border-radius: 2px;
+  }
+
+  .sketch-border::before {
+    content: '';
+    position: absolute;
+    top: -1px;
+    left: -1px;
+    right: -1px;
+    bottom: -1px;
+    border: 1px solid var(--sketch-black);
+    border-radius: 3px;
+    opacity: 0.3;
+    transform: translate(1px, 1px);
+  }
+
+  /* Rough/sketchy box */
+  .sketch-box {
+    background: var(--sketch-white);
+    border: 2px solid var(--sketch-black);
+    box-shadow: 3px 3px 0 0 var(--sketch-black);
+    transition: all 0.2s ease;
+  }
+
+  .sketch-box:hover {
+    transform: translate(-1px, -1px);
+    box-shadow: 4px 4px 0 0 var(--sketch-black);
+  }
+
+  /* Button styles */
+  .sketch-btn {
+    @apply px-6 py-3 font-mono text-sm uppercase tracking-wider;
+    background: var(--sketch-white);
+    border: 2px solid var(--sketch-black);
+    box-shadow: 3px 3px 0 0 var(--sketch-black);
+    transition: all 0.15s ease;
+    cursor: pointer;
+  }
+
+  .sketch-btn:hover {
+    transform: translate(-2px, -2px);
+    box-shadow: 5px 5px 0 0 var(--sketch-black);
+  }
+
+  .sketch-btn:active {
+    transform: translate(1px, 1px);
+    box-shadow: 2px 2px 0 0 var(--sketch-black);
+  }
+
+  .sketch-btn-primary {
+    @apply sketch-btn;
+    background: var(--sketch-black);
+    color: var(--sketch-white);
+  }
+
+  .sketch-btn-primary:hover {
+    background: var(--sketch-dark);
+  }
+
+  /* Input styles */
+  .sketch-input {
+    @apply w-full px-4 py-3 font-mono text-sm;
+    background: var(--sketch-white);
+    border: 2px solid var(--sketch-black);
+    outline: none;
+    transition: all 0.2s ease;
+  }
+
+  .sketch-input:focus {
+    box-shadow: 3px 3px 0 0 var(--sketch-black);
+    transform: translate(-1px, -1px);
+  }
+
+  .sketch-input::placeholder {
+    color: var(--sketch-light);
+    font-style: italic;
+  }
+
+  /* Select styles */
+  .sketch-select {
+    @apply sketch-input appearance-none cursor-pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%231a1a1a' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 40px;
+  }
+
+  /* Checkbox styles */
+  .sketch-checkbox {
+    @apply w-5 h-5 cursor-pointer;
+    appearance: none;
+    background: var(--sketch-white);
+    border: 2px solid var(--sketch-black);
+    position: relative;
+  }
+
+  .sketch-checkbox:checked {
+    background: var(--sketch-black);
+  }
+
+  .sketch-checkbox:checked::after {
+    content: '✓';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--sketch-white);
+    font-size: 14px;
+    font-weight: bold;
+  }
+
+  /* Card styles */
+  .sketch-card {
+    @apply p-6;
+    background: var(--sketch-white);
+    border: 2px solid var(--sketch-black);
+    box-shadow: 4px 4px 0 0 var(--sketch-black);
+  }
+
+  /* Divider */
+  .sketch-divider {
+    height: 2px;
+    background: repeating-linear-gradient(
+      90deg,
+      var(--sketch-black) 0px,
+      var(--sketch-black) 8px,
+      transparent 8px,
+      transparent 12px
+    );
+  }
+
+  /* Badge */
+  .sketch-badge {
+    @apply inline-flex items-center px-3 py-1 text-xs font-mono uppercase tracking-wider;
+    border: 1px solid var(--sketch-black);
+    background: var(--sketch-white);
+  }
+
+  .sketch-badge-dark {
+    @apply sketch-badge;
+    background: var(--sketch-black);
+    color: var(--sketch-white);
+  }
+
+  /* Handwritten text */
+  .handwritten {
+    font-family: 'Caveat', cursive;
+  }
+
+  /* Technical label */
+  .tech-label {
+    @apply text-xs uppercase tracking-widest;
+    font-family: 'Space Mono', monospace;
+    color: var(--sketch-gray);
+  }
+}
+
+/* Animations */
+@layer utilities {
+  .animate-sketch-in {
+    animation: sketchIn 0.4s ease-out forwards;
+  }
+
+  @keyframes sketchIn {
+    0% {
+      opacity: 0;
+      transform: translateY(10px) scale(0.98);
+    }
+    100% {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  .animate-draw {
+    stroke-dasharray: 1000;
+    stroke-dashoffset: 1000;
+    animation: draw 1.5s ease-out forwards;
+  }
+
+  @keyframes draw {
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  /* Squiggly underline */
+  .squiggle {
+    text-decoration: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='8' viewBox='0 0 100 8'%3E%3Cpath fill='none' stroke='%231a1a1a' stroke-width='2' d='M0,4 Q12.5,0 25,4 T50,4 T75,4 T100,4'/%3E%3C/svg%3E");
+    background-repeat: repeat-x;
+    background-position: bottom;
+    background-size: 100px 8px;
+    padding-bottom: 8px;
+  }
+
+  /* Crosshatch pattern */
+  .crosshatch {
+    background-image:
+      linear-gradient(45deg, var(--sketch-pale) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--sketch-pale) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--sketch-pale) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--sketch-pale) 75%);
+    background-size: 8px 8px;
+    background-position: 0 0, 0 4px, 4px -4px, -4px 0px;
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--sketch-paper);
+  border-left: 1px solid var(--sketch-pale);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--sketch-gray);
+  border: 1px solid var(--sketch-black);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--sketch-dark);
+}
+
+/* Selection */
+::selection {
+  background: var(--sketch-black);
+  color: var(--sketch-white);
+}
+
+/* Code blocks */
+pre, code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.875rem;
+}
+
+code {
+  background: var(--sketch-white);
+  border: 1px solid var(--sketch-pale);
+  padding: 0.125rem 0.375rem;
+}
+
+pre {
+  background: var(--sketch-white);
+  border: 2px solid var(--sketch-black);
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+/* Range input */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 8px;
+  background: var(--sketch-pale);
+  border: 1px solid var(--sketch-black);
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  background: var(--sketch-white);
+  border: 2px solid var(--sketch-black);
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  background: var(--sketch-paper);
+  box-shadow: 2px 2px 0 0 var(--sketch-black);
+}
