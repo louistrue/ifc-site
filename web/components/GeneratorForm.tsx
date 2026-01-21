@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 import FeatureToggle from './FeatureToggle'
 import JobTracker from './JobTracker'
+import AddressAutocomplete from './AddressAutocomplete'
 import { createJob, GenerateRequest } from '@/lib/api'
 
 // Interesting Swiss locations for Lucky Draw (using addresses that get resolved to real EGRIDs)
@@ -47,8 +48,7 @@ const LUCKY_LOCATIONS = [
 ]
 
 interface FormState {
-  egrid: string
-  address: string // For Lucky Draw - backend resolves to EGRID
+  address: string // Swiss address - backend resolves to EGRID
   // Features
   includeTerrain: boolean
   includeSiteSolid: boolean
@@ -107,7 +107,6 @@ const LOADING_MESSAGES = [
 ]
 
 const defaultState: FormState = {
-  egrid: '',
   address: '',
   includeTerrain: true,
   includeSiteSolid: true,
@@ -144,7 +143,6 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
       setLuckyPick(secret)
       setForm(prev => ({
         ...prev,
-        egrid: '',
         address: secret.address,
         includeRoads: true,
         includeBuildings: true,
@@ -207,9 +205,8 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
       return updated
     })
 
-    if (key === 'egrid') {
+    if (key === 'address') {
       setLuckyPick(null)
-      setForm((prev) => ({ ...prev, address: '' }))
     }
   }
 
@@ -229,7 +226,7 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
   const luckyDraw = () => {
     const pick = LUCKY_LOCATIONS[Math.floor(Math.random() * LUCKY_LOCATIONS.length)]
     setLuckyPick(pick)
-    setForm((prev) => ({ ...prev, egrid: '', address: pick.address }))
+    setForm((prev) => ({ ...prev, address: pick.address }))
   }
 
   const handleJobStatusChange = (jobId: string, status: ActiveJob['status']) => {
@@ -245,7 +242,7 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
 
     try {
       const request: GenerateRequest = {
-        ...(form.address ? { address: form.address } : { egrid: form.egrid }),
+        address: form.address,
         include_terrain: form.includeTerrain,
         include_site_solid: form.includeSiteSolid,
         include_roads: form.includeRoads,
@@ -266,14 +263,14 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
       setActiveJobs((prev) => [
         {
           id: result.job_id,
-          location: form.address || form.egrid,
+          location: form.address,
           name: luckyPick?.name,
           status: 'pending',
         },
         ...prev,
       ])
 
-      setForm((prev) => ({ ...prev, egrid: '', address: '' }))
+      setForm((prev) => ({ ...prev, address: '' }))
       setLuckyPick(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start generation')
@@ -336,22 +333,27 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
           </AnimatePresence>
 
           <div>
-            <label className="tech-label block mb-2">Swiss EGRID</label>
-            <input
-              type="text"
-              value={luckyPick ? luckyPick.address : form.egrid}
-              onChange={(e) => updateForm('egrid', e.target.value)}
-              placeholder="CH999979659148"
-              className="sketch-input font-mono"
-              pattern={luckyPick ? undefined : "^CH[0-9]{9,18}$"}
-              required={!luckyPick}
+            <label className="tech-label block mb-2">Swiss Address</label>
+            <AddressAutocomplete
+              value={form.address}
+              onChange={(addr) => {
+                setForm(prev => ({ ...prev, address: addr }))
+                if (luckyPick && addr !== luckyPick.address) {
+                  setLuckyPick(null)
+                }
+              }}
+              onSelect={(suggestion) => {
+                setForm(prev => ({ ...prev, address: suggestion.label }))
+                setLuckyPick(null)
+              }}
+              placeholder="Bundesplatz 3, Bern"
               disabled={!!luckyPick}
             />
             <p className="text-xs text-sketch-gray mt-2">
               {luckyPick ? (
-                <>Using address: {luckyPick.address} — <button type="button" onClick={() => { setLuckyPick(null); setForm(prev => ({ ...prev, address: '' })) }} className="underline hover:text-sketch-black">Clear &amp; enter EGRID</button></>
+                <>Selected: {luckyPick.name} — <button type="button" onClick={() => { setLuckyPick(null); setForm(prev => ({ ...prev, address: '' })) }} className="underline hover:text-sketch-black">Clear &amp; search</button></>
               ) : (
-                <>Swiss cadastral identifier — or try <button type="button" onClick={luckyDraw} className="underline hover:text-sketch-black">Lucky Draw</button></>
+                <>Start typing to search Swiss addresses — or try <button type="button" onClick={luckyDraw} className="underline hover:text-sketch-black">Lucky Draw</button></>
               )}
             </p>
           </div>
