@@ -74,8 +74,8 @@ export default function Home() {
           />
         </div>
 
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 lg:py-32">
-          <div className="grid lg:grid-cols-2 gap-12 lg:gap-20 items-center">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 lg:py-16">
+          <div className="grid lg:grid-cols-2 gap-8 lg:gap-12 items-center">
             {/* Left: Text */}
             <motion.div
               initial={{ opacity: 0, y: 20 }}
@@ -83,7 +83,7 @@ export default function Home() {
               transition={{ duration: 0.6 }}
             >
               <motion.div
-                className="sketch-badge-dark mb-6"
+                className="sketch-badge-dark mb-4"
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ delay: 0.2 }}
@@ -91,25 +91,25 @@ export default function Home() {
                 Swiss Cadastral Data → IFC
               </motion.div>
 
-              <h1 className="text-4xl sm:text-5xl lg:text-6xl font-tech font-bold leading-tight mb-6">
+              <h1 className="text-3xl sm:text-4xl lg:text-5xl font-tech font-bold leading-tight mb-4">
                 <span className="block">Site Models</span>
                 <span className="block text-sketch-gray">
-                  <span className="handwritten text-5xl sm:text-6xl lg:text-7xl">sketched</span> to BIM
+                  <span className="handwritten text-4xl sm:text-5xl lg:text-6xl">sketched</span> to BIM
                 </span>
               </h1>
 
-              <p className="text-lg text-sketch-gray mb-8 max-w-xl leading-relaxed">
+              <p className="text-base text-sketch-gray mb-6 max-w-xl leading-relaxed">
                 Generate IFC files from Swiss cadastral data. Terrain, buildings,
                 roads, vegetation — all combined into a single BIM model ready for
                 your architectural workflow.
               </p>
 
               {/* Feature pills */}
-              <div className="flex flex-wrap gap-2 mb-8">
+              <div className="flex flex-wrap gap-2 mb-6">
                 {features.map((f, i) => (
                   <motion.div
                     key={f.label}
-                    className="flex items-center gap-2 px-3 py-2 bg-sketch-white border border-sketch-pale"
+                    className="flex items-center gap-2 px-3 py-1.5 bg-sketch-white border border-sketch-pale"
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: 0.3 + i * 0.05 }}
@@ -134,13 +134,13 @@ export default function Home() {
 
             {/* Right: Visual */}
             <motion.div
-              className="relative"
+              className="relative hidden lg:block"
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ duration: 0.6, delay: 0.2 }}
             >
               {/* Sketch illustration */}
-              <div className="relative aspect-square max-w-md mx-auto">
+              <div className="relative max-w-sm mx-auto">
                 <svg
                   viewBox="0 0 400 400"
                   className="w-full h-full"
