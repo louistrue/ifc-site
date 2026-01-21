@@ -23,20 +23,23 @@ import FeatureToggle from './FeatureToggle'
 import JobTracker from './JobTracker'
 import { createJob, GenerateRequest } from '@/lib/api'
 
-// Interesting Swiss locations for Lucky Draw
-const LUCKY_EGRIDS = [
-  { egrid: 'CH938067016674', name: 'Bundeshaus, Bern', desc: 'Federal Palace' },
-  { egrid: 'CH279127032498', name: 'ETH Zurich', desc: 'Technical University' },
-  { egrid: 'CH267416027498', name: 'Zurich HB', desc: 'Main Station' },
-  { egrid: 'CH174657285462', name: 'Jet d\'Eau, Geneva', desc: 'Famous Fountain' },
-  { egrid: 'CH492656023498', name: 'Luzern Altstadt', desc: 'Old Town' },
-  { egrid: 'CH837182659148', name: 'Basel SBB', desc: 'Train Station' },
-  { egrid: 'CH130289756842', name: 'Lausanne Cathedral', desc: 'Gothic Cathedral' },
-  { egrid: 'CH944629183756', name: 'Bern Altstadt', desc: 'UNESCO Old Town' },
+// Interesting Swiss locations for Lucky Draw (using addresses that get resolved to real EGRIDs)
+const LUCKY_LOCATIONS = [
+  { address: 'Bundesplatz 3, Bern', name: 'Bundeshaus, Bern', desc: 'Federal Palace' },
+  { address: 'Rämistrasse 101, Zürich', name: 'ETH Zurich', desc: 'Technical University' },
+  { address: 'Bahnhofplatz 15, Zürich', name: 'Zurich HB', desc: 'Main Station' },
+  { address: 'Quai Gustave-Ador 42, Genève', name: 'Jet d\'Eau, Geneva', desc: 'Famous Fountain' },
+  { address: 'Kapellplatz 1, Luzern', name: 'Luzern Altstadt', desc: 'Chapel Square' },
+  { address: 'Centralbahnplatz 1, Basel', name: 'Basel SBB', desc: 'Train Station' },
+  { address: 'Place de la Cathédrale, Lausanne', name: 'Lausanne Cathedral', desc: 'Gothic Cathedral' },
+  { address: 'Kramgasse 49, Bern', name: 'Einstein House, Bern', desc: 'Historic Old Town' },
+  { address: 'Münsterhof 1, Zürich', name: 'Fraumünster, Zurich', desc: 'Historic Church' },
+  { address: 'Piazza della Riforma 1, Lugano', name: 'Lugano Centro', desc: 'Piazza della Riforma' },
 ]
 
 interface FormState {
   egrid: string
+  address: string // For Lucky Draw - backend resolves to EGRID
   // Features
   includeTerrain: boolean
   includeSiteSolid: boolean
@@ -56,12 +59,13 @@ interface FormState {
 
 interface ActiveJob {
   id: string
-  egrid: string
+  location: string // EGRID or address
   name?: string
 }
 
 const defaultState: FormState = {
   egrid: '',
+  address: '',
   includeTerrain: true,
   includeSiteSolid: true,
   includeRoads: false,
@@ -83,12 +87,13 @@ export default function GeneratorForm() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([])
-  const [luckyPick, setLuckyPick] = useState<typeof LUCKY_EGRIDS[0] | null>(null)
+  const [luckyPick, setLuckyPick] = useState<typeof LUCKY_LOCATIONS[0] | null>(null)
 
   const updateForm = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }))
     if (key === 'egrid') {
       setLuckyPick(null) // Clear lucky pick when manually editing
+      setForm((prev) => ({ ...prev, address: '' })) // Clear address when using manual EGRID
     }
   }
 
@@ -106,9 +111,9 @@ export default function GeneratorForm() {
   }
 
   const luckyDraw = () => {
-    const pick = LUCKY_EGRIDS[Math.floor(Math.random() * LUCKY_EGRIDS.length)]
+    const pick = LUCKY_LOCATIONS[Math.floor(Math.random() * LUCKY_LOCATIONS.length)]
     setLuckyPick(pick)
-    setForm((prev) => ({ ...prev, egrid: pick.egrid }))
+    setForm((prev) => ({ ...prev, egrid: '', address: pick.address }))
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -117,8 +122,9 @@ export default function GeneratorForm() {
     setIsSubmitting(true)
 
     try {
+      // Use address for Lucky Draw, egrid for manual input
       const request: GenerateRequest = {
-        egrid: form.egrid,
+        ...(form.address ? { address: form.address } : { egrid: form.egrid }),
         include_terrain: form.includeTerrain,
         include_site_solid: form.includeSiteSolid,
         include_roads: form.includeRoads,
@@ -140,14 +146,14 @@ export default function GeneratorForm() {
       setActiveJobs((prev) => [
         {
           id: result.job_id,
-          egrid: form.egrid,
+          location: form.address || form.egrid,
           name: luckyPick?.name,
         },
         ...prev,
       ])
 
       // Reset form for next generation
-      setForm((prev) => ({ ...prev, egrid: '' }))
+      setForm((prev) => ({ ...prev, egrid: '', address: '' }))
       setLuckyPick(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start generation')
@@ -173,7 +179,7 @@ export default function GeneratorForm() {
             className="relative"
           >
             <div className="absolute -top-2 -left-2 sketch-badge-dark text-[10px] z-10">
-              {job.name || job.egrid.slice(0, 12)}...
+              {job.name || job.location.slice(0, 16)}...
             </div>
             <JobTracker
               jobId={job.id}
@@ -231,15 +237,20 @@ export default function GeneratorForm() {
             <label className="tech-label block mb-2">Swiss EGRID</label>
             <input
               type="text"
-              value={form.egrid}
+              value={luckyPick ? luckyPick.address : form.egrid}
               onChange={(e) => updateForm('egrid', e.target.value)}
               placeholder="CH999979659148"
               className="sketch-input font-mono"
-              pattern="^CH[0-9]{9,18}$"
-              required
+              pattern={luckyPick ? undefined : "^CH[0-9]{9,18}$"}
+              required={!luckyPick}
+              disabled={!!luckyPick}
             />
             <p className="text-xs text-sketch-gray mt-2">
-              Swiss cadastral identifier — or try <button type="button" onClick={luckyDraw} className="underline hover:text-sketch-black">Lucky Draw</button>
+              {luckyPick ? (
+                <>Using address: {luckyPick.address} — <button type="button" onClick={() => { setLuckyPick(null); setForm(prev => ({ ...prev, address: '' })) }} className="underline hover:text-sketch-black">Clear &amp; enter EGRID</button></>
+              ) : (
+                <>Swiss cadastral identifier — or try <button type="button" onClick={luckyDraw} className="underline hover:text-sketch-black">Lucky Draw</button></>
+              )}
             </p>
           </div>
         </section>
