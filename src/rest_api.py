@@ -63,12 +63,18 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # CORS - configure allowed origins (restrict in production)
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+# Strip whitespace from origins
+ALLOWED_ORIGINS = [origin.strip() for origin in ALLOWED_ORIGINS if origin.strip()]
+if not ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,  # Set True only if needed
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept", "Origin", "X-Requested-With"],
+    expose_headers=["X-GLTF-Available", "X-Texture-Available", "X-Additional-Files-Available"],
 )
 
 # Trusted Host middleware (prevents host header attacks)

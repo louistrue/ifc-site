@@ -1,4 +1,5 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+// Remove trailing slash from API URL
+const API_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080').replace(/\/+$/, '')
 
 export interface GenerateRequest {
   egrid?: string
@@ -48,20 +49,28 @@ export interface JobCreateResponse {
 }
 
 export async function createJob(request: GenerateRequest): Promise<JobCreateResponse> {
-  const response = await fetch(`${API_URL}/jobs`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(request),
-  })
+  try {
+    const response = await fetch(`${API_URL}/jobs`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(request),
+    })
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: 'Unknown error' }))
-    throw new Error(error.detail || `HTTP ${response.status}`)
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Unknown error' }))
+      throw new Error(error.detail || `HTTP ${response.status}`)
+    }
+
+    return response.json()
+  } catch (err) {
+    // Better error messages for network/CORS issues
+    if (err instanceof TypeError) {
+      throw new Error(`Cannot connect to API. Please check that the server at ${API_URL} is running and CORS is properly configured.`)
+    }
+    throw err
   }
-
-  return response.json()
 }
 
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
