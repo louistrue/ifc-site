@@ -18,6 +18,7 @@ import {
   AlertCircle,
   Dices,
   Plus,
+  CheckCircle2,
 } from 'lucide-react'
 import FeatureToggle from './FeatureToggle'
 import JobTracker from './JobTracker'
@@ -69,20 +70,20 @@ interface ActiveJob {
   id: string
   location: string // EGRID or address
   name?: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'expired'
 }
 
 // Limits to prevent abuse
 const LIMITS = {
-  MAX_RADIUS: 500,       // Max 500m radius
-  MIN_RADIUS: 50,        // Min 50m radius
-  MAX_RESOLUTION: 15,    // Coarsest resolution
-  MIN_RESOLUTION: 2,     // Finest resolution
-  MAX_FEATURES: 5,       // Max features at once
+  MAX_RADIUS: 500,
+  MIN_RADIUS: 50,
+  MAX_RESOLUTION: 15,
+  MIN_RESOLUTION: 2,
+  MAX_FEATURES: 5,
 }
 
 // Calculate adaptive resolution based on radius
 function getAdaptiveResolution(radius: number): number {
-  // More generous - finer detail at all sizes
   if (radius <= 100) return 2
   if (radius <= 200) return 5
   if (radius <= 350) return 8
@@ -105,9 +106,6 @@ const LOADING_MESSAGES = [
   'Calibrating cuckoo clocks...',
 ]
 
-// Easter egg: Konami code tracker
-const KONAMI_CODE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a']
-
 const defaultState: FormState = {
   egrid: '',
   address: '',
@@ -121,12 +119,16 @@ const defaultState: FormState = {
   includeBridges: false,
   includeSatellite: false,
   exportGltf: false,
-  radius: 200,           // Sensible default
-  resolution: 10,        // Medium resolution
+  radius: 200,
+  resolution: 5,
   outputName: 'site_model.ifc',
 }
 
-export default function GeneratorForm() {
+interface GeneratorFormProps {
+  secretMode?: boolean
+}
+
+export default function GeneratorForm({ secretMode = false }: GeneratorFormProps) {
   const [form, setForm] = useState<FormState>(defaultState)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -134,8 +136,25 @@ export default function GeneratorForm() {
   const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([])
   const [luckyPick, setLuckyPick] = useState<typeof LUCKY_LOCATIONS[0] | null>(null)
   const [loadingMsg, setLoadingMsg] = useState(LOADING_MESSAGES[0])
-  const [konamiIndex, setKonamiIndex] = useState(0)
-  const [secretMode, setSecretMode] = useState(false)
+
+  // Apply secret mode settings when activated
+  useEffect(() => {
+    if (secretMode) {
+      const secret = LUCKY_LOCATIONS.find(l => l.name.includes('Toblerone')) || LUCKY_LOCATIONS[0]
+      setLuckyPick(secret)
+      setForm(prev => ({
+        ...prev,
+        egrid: '',
+        address: secret.address,
+        includeRoads: true,
+        includeBuildings: true,
+        includeForest: true,
+        includeWater: true,
+        radius: 300,
+        resolution: 2, // Maximum detail
+      }))
+    }
+  }, [secretMode])
 
   // Rotate loading message while submitting
   useEffect(() => {
@@ -146,28 +165,9 @@ export default function GeneratorForm() {
     return () => clearInterval(interval)
   }, [isSubmitting])
 
-  // Konami code easter egg
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === KONAMI_CODE[konamiIndex]) {
-        const next = konamiIndex + 1
-        if (next === KONAMI_CODE.length) {
-          setSecretMode(true)
-          setKonamiIndex(0)
-          // Auto-fill with a fun location
-          const secret = LUCKY_LOCATIONS.find(l => l.name.includes('Toblerone')) || LUCKY_LOCATIONS[0]
-          setLuckyPick(secret)
-          setForm(prev => ({ ...prev, egrid: '', address: secret.address }))
-        } else {
-          setKonamiIndex(next)
-        }
-      } else {
-        setKonamiIndex(0)
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [konamiIndex])
+  // Count running jobs
+  const runningJobsCount = activeJobs.filter(j => j.status === 'pending' || j.status === 'running').length
+  const completedJobsCount = activeJobs.filter(j => j.status === 'completed').length
 
   // Count active optional features (excludes terrain and site solid which are lightweight)
   const countActiveFeatures = (state: FormState): number => {
@@ -198,7 +198,6 @@ export default function GeneratorForm() {
       if (featureKeys.includes(key) && value === true) {
         const activeCount = countActiveFeatures(updated)
         if (activeCount > LIMITS.MAX_FEATURES) {
-          // Don't allow enabling more features - revert
           updated[key] = false as FormState[K]
           setError(`Maximum ${LIMITS.MAX_FEATURES} features at once to ensure fast generation`)
           setTimeout(() => setError(null), 3000)
@@ -209,20 +208,18 @@ export default function GeneratorForm() {
     })
 
     if (key === 'egrid') {
-      setLuckyPick(null) // Clear lucky pick when manually editing
-      setForm((prev) => ({ ...prev, address: '' })) // Clear address when using manual EGRID
+      setLuckyPick(null)
+      setForm((prev) => ({ ...prev, address: '' }))
     }
   }
 
   const enableRecommended = () => {
-    // Enable a sensible set that fits within limits
     setForm((prev) => ({
       ...prev,
       includeRoads: true,
       includeBuildings: true,
       includeForest: true,
       includeWater: true,
-      // Leave railways and satellite off to stay within limit
       includeRailways: false,
       includeSatellite: false,
       exportGltf: false,
@@ -235,13 +232,18 @@ export default function GeneratorForm() {
     setForm((prev) => ({ ...prev, egrid: '', address: pick.address }))
   }
 
+  const handleJobStatusChange = (jobId: string, status: ActiveJob['status']) => {
+    setActiveJobs(prev => prev.map(job =>
+      job.id === jobId ? { ...job, status } : job
+    ))
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
     setIsSubmitting(true)
 
     try {
-      // Use address for Lucky Draw, egrid for manual input
       const request: GenerateRequest = {
         ...(form.address ? { address: form.address } : { egrid: form.egrid }),
         include_terrain: form.includeTerrain,
@@ -261,17 +263,16 @@ export default function GeneratorForm() {
 
       const result = await createJob(request)
 
-      // Add to active jobs list
       setActiveJobs((prev) => [
         {
           id: result.job_id,
           location: form.address || form.egrid,
           name: luckyPick?.name,
+          status: 'pending',
         },
         ...prev,
       ])
 
-      // Reset form for next generation
       setForm((prev) => ({ ...prev, egrid: '', address: '' }))
       setLuckyPick(null)
     } catch (err) {
@@ -289,16 +290,20 @@ export default function GeneratorForm() {
     <div className="space-y-8">
       {/* Form */}
       <form onSubmit={handleSubmit} className="space-y-8">
-        {/* Location Input */}
-        <section className="sketch-card">
+        {/* Location Section */}
+        <section className={`sketch-card ${secretMode ? 'border-purple-400 border-2' : ''}`}>
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <MapPin size={18} className="text-sketch-gray" />
               <h3 className="font-mono font-medium">Location</h3>
               {secretMode && (
-                <span className="text-[10px] px-2 py-0.5 bg-gradient-to-r from-purple-500 to-pink-500 text-white animate-pulse">
+                <motion.span
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1 }}
+                  className="text-[10px] px-2 py-0.5 bg-gradient-to-r from-purple-500 to-pink-500 text-white"
+                >
                   SECRET MODE
-                </span>
+                </motion.span>
               )}
             </div>
             <button
@@ -319,10 +324,10 @@ export default function GeneratorForm() {
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
                 exit={{ opacity: 0, height: 0 }}
-                className="mb-4 p-3 bg-sketch-paper border-2 border-dashed border-sketch-gray"
+                className={`mb-4 p-3 border-2 border-dashed ${secretMode ? 'bg-purple-50 border-purple-300' : 'bg-sketch-paper border-sketch-gray'}`}
               >
                 <div className="flex items-center gap-2">
-                  <Dices size={16} className="text-sketch-gray" />
+                  <Dices size={16} className={secretMode ? 'text-purple-600' : 'text-sketch-gray'} />
                   <span className="font-mono text-sm font-medium">{luckyPick.name}</span>
                 </div>
                 <p className="text-xs text-sketch-gray mt-1">{luckyPick.desc}</p>
@@ -392,18 +397,18 @@ export default function GeneratorForm() {
               onChange={(v) => updateForm('includeSiteSolid', v)}
             />
             <FeatureToggle
-              icon={Building2}
-              label="Buildings"
-              description="3D buildings from CityGML"
-              checked={form.includeBuildings}
-              onChange={(v) => updateForm('includeBuildings', v)}
-            />
-            <FeatureToggle
               icon={Car}
               label="Roads"
-              description="Road network geometry"
+              description="Street network geometry"
               checked={form.includeRoads}
               onChange={(v) => updateForm('includeRoads', v)}
+            />
+            <FeatureToggle
+              icon={Building2}
+              label="Buildings"
+              description="3D building footprints"
+              checked={form.includeBuildings}
+              onChange={(v) => updateForm('includeBuildings', v)}
             />
             <FeatureToggle
               icon={TreePine}
@@ -422,7 +427,7 @@ export default function GeneratorForm() {
             <FeatureToggle
               icon={Train}
               label="Railways"
-              description="Rail tracks and stations"
+              description="Rail infrastructure"
               checked={form.includeRailways}
               onChange={(v) => updateForm('includeRailways', v)}
             />
@@ -465,13 +470,11 @@ export default function GeneratorForm() {
                 className="overflow-hidden"
               >
                 <div className="pt-4 space-y-4">
-                  {/* Info box */}
                   <div className="p-3 bg-sketch-pale border border-sketch-gray text-xs text-sketch-gray">
                     Resolution adapts automatically to radius for optimal performance.
-                    Larger areas use coarser resolution to keep file sizes manageable.
+                    {secretMode && ' Secret mode: Maximum detail enabled!'}
                   </div>
 
-                  {/* Radius */}
                   <div>
                     <div className="flex justify-between mb-2">
                       <label className="tech-label">Radius</label>
@@ -492,7 +495,6 @@ export default function GeneratorForm() {
                     </div>
                   </div>
 
-                  {/* Resolution - read-only, set by adaptive logic */}
                   <div>
                     <div className="flex justify-between mb-2">
                       <label className="tech-label">Resolution (auto)</label>
@@ -500,32 +502,30 @@ export default function GeneratorForm() {
                     </div>
                     <div className="h-2 bg-sketch-pale border border-sketch-gray relative">
                       <div
-                        className="absolute inset-y-0 left-0 bg-sketch-black"
-                        style={{ width: `${((form.resolution - LIMITS.MIN_RESOLUTION) / (LIMITS.MAX_RESOLUTION - LIMITS.MIN_RESOLUTION)) * 100}%` }}
+                        className={`absolute inset-y-0 left-0 ${secretMode ? 'bg-purple-500' : 'bg-sketch-black'}`}
+                        style={{ width: `${((LIMITS.MAX_RESOLUTION - form.resolution) / (LIMITS.MAX_RESOLUTION - LIMITS.MIN_RESOLUTION)) * 100}%` }}
                       />
                     </div>
                     <p className="text-[10px] text-sketch-gray mt-1">
-                      {form.resolution <= 5 ? 'Fine detail' : form.resolution <= 10 ? 'Medium detail' : 'Optimized for large area'}
+                      {form.resolution <= 2 ? 'Maximum detail' : form.resolution <= 5 ? 'Fine detail' : form.resolution <= 8 ? 'Medium detail' : 'Optimized for large area'}
                     </p>
                   </div>
 
-                  {/* Output Name */}
                   <div>
                     <label className="tech-label block mb-2">Output Filename</label>
                     <input
                       type="text"
                       value={form.outputName}
                       onChange={(e) => updateForm('outputName', e.target.value)}
-                      placeholder="site_model.ifc"
                       className="sketch-input font-mono"
+                      placeholder="site_model.ifc"
                     />
                   </div>
 
-                  {/* Export glTF */}
                   <div className="flex items-center gap-3 p-3 bg-sketch-paper border border-sketch-pale">
                     <input
                       type="checkbox"
-                      className="sketch-checkbox"
+                      id="exportGltf"
                       checked={form.exportGltf}
                       onChange={(e) => updateForm('exportGltf', e.target.checked)}
                     />
@@ -561,7 +561,11 @@ export default function GeneratorForm() {
         <button
           type="submit"
           disabled={isSubmitting}
-          className={`sketch-btn-primary w-full py-4 text-base flex items-center justify-center gap-3 disabled:opacity-50 ${secretMode ? 'bg-gradient-to-r from-purple-600 to-pink-600 border-purple-700' : ''}`}
+          className={`w-full py-4 text-base flex items-center justify-center gap-3 disabled:opacity-50 transition-all ${
+            secretMode
+              ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white border-2 border-purple-700 hover:from-purple-700 hover:to-pink-700'
+              : 'sketch-btn-primary'
+          }`}
         >
           {isSubmitting ? (
             <>
@@ -576,13 +580,12 @@ export default function GeneratorForm() {
           )}
         </button>
 
-        {/* Subtle hint */}
-        <p className="text-center text-[10px] text-sketch-gray/50 mt-3 select-none">
-          Made with Swiss precision · v0.1 · {secretMode ? 'You found the secret!' : '↑↑↓↓←→←→BA'}
+        <p className="text-center text-[10px] text-sketch-gray/50 select-none">
+          Made with Swiss precision · v0.1
         </p>
       </form>
 
-      {/* Active Jobs - shown below form so user sees them after clicking generate */}
+      {/* Active Jobs */}
       <AnimatePresence>
         {activeJobs.length > 0 && (
           <motion.div
@@ -590,10 +593,38 @@ export default function GeneratorForm() {
             animate={{ opacity: 1 }}
             className="space-y-4"
           >
-            <div className="flex items-center gap-2 text-sketch-gray">
-              <Loader2 size={16} className="animate-spin" />
-              <span className="text-sm font-mono">Active generations ({activeJobs.length})</span>
+            {/* Header with live counter */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                {runningJobsCount > 0 ? (
+                  <Loader2 size={16} className="animate-spin text-amber-600" />
+                ) : (
+                  <CheckCircle2 size={16} className="text-green-600" />
+                )}
+                <span className="text-sm font-mono">
+                  {runningJobsCount > 0 ? (
+                    <>
+                      <span className="text-amber-600 font-medium">{runningJobsCount} running</span>
+                      {completedJobsCount > 0 && (
+                        <span className="text-sketch-gray"> · {completedJobsCount} completed</span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-green-600 font-medium">{completedJobsCount} completed</span>
+                  )}
+                </span>
+              </div>
+              {activeJobs.length > 1 && (
+                <button
+                  onClick={() => setActiveJobs(prev => prev.filter(j => j.status === 'running' || j.status === 'pending'))}
+                  className="text-xs text-sketch-gray hover:text-red-600 transition-colors font-mono"
+                >
+                  Clear completed
+                </button>
+              )}
             </div>
+
+            {/* Job cards */}
             {activeJobs.map((job) => (
               <motion.div
                 key={job.id}
@@ -602,13 +633,20 @@ export default function GeneratorForm() {
                 exit={{ opacity: 0, scale: 0.95 }}
                 className="relative"
               >
-                <div className="absolute -top-2 -left-2 sketch-badge-dark text-[10px] z-10">
+                <div className={`absolute -top-2 -left-2 text-[10px] z-10 px-2 py-0.5 ${
+                  job.status === 'completed'
+                    ? 'bg-green-600 text-white'
+                    : job.status === 'failed' || job.status === 'expired'
+                    ? 'bg-red-600 text-white'
+                    : 'sketch-badge-dark'
+                }`}>
                   {job.name || job.location.slice(0, 16)}...
                 </div>
                 <JobTracker
                   jobId={job.id}
-                  onComplete={() => {}}
-                  onError={(err) => setError(err)}
+                  onComplete={() => handleJobStatusChange(job.id, 'completed')}
+                  onError={() => handleJobStatusChange(job.id, 'failed')}
+                  onStatusChange={(status) => handleJobStatusChange(job.id, status)}
                 />
                 <button
                   onClick={() => removeJob(job.id)}

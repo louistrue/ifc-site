@@ -1,6 +1,7 @@
 'use client'
 
-import { motion } from 'framer-motion'
+import { useState, useCallback } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
 import {
   Mountain,
   Building2,
@@ -12,25 +13,105 @@ import {
   ArrowDown,
   Terminal,
   Globe,
-  Zap,
+  Sparkles,
 } from 'lucide-react'
 import Header from '@/components/Header'
 import GeneratorForm from '@/components/GeneratorForm'
 
 const features = [
-  { icon: Mountain, label: 'Terrain', desc: 'Swiss elevation data' },
-  { icon: Building2, label: 'Buildings', desc: 'CityGML 3D models' },
-  { icon: Car, label: 'Roads', desc: 'SwissTLM3D network' },
-  { icon: TreePine, label: 'Forest', desc: 'Vegetation coverage' },
-  { icon: Droplets, label: 'Water', desc: 'Lakes & rivers' },
-  { icon: Train, label: 'Railways', desc: 'Rail infrastructure' },
-  { icon: Satellite, label: 'Imagery', desc: 'SWISSIMAGE overlay' },
+  { icon: Mountain, label: 'Terrain', desc: 'Swiss elevation data', key: 'terrain' },
+  { icon: Building2, label: 'Buildings', desc: 'CityGML 3D models', key: 'buildings' },
+  { icon: Car, label: 'Roads', desc: 'SwissTLM3D network', key: 'roads' },
+  { icon: TreePine, label: 'Forest', desc: 'Vegetation coverage', key: 'forest' },
+  { icon: Droplets, label: 'Water', desc: 'Lakes & rivers', key: 'water' },
+  { icon: Train, label: 'Railways', desc: 'Rail infrastructure', key: 'railways' },
+  { icon: Satellite, label: 'Imagery', desc: 'SWISSIMAGE overlay', key: 'imagery' },
 ]
 
+// Secret sequence: Click features in this order to unlock secret mode
+// Terrain → Water → Forest → Satellite (from ground to sky!)
+const SECRET_SEQUENCE = ['terrain', 'water', 'forest', 'imagery']
+
 export default function Home() {
+  const [clickSequence, setClickSequence] = useState<string[]>([])
+  const [secretUnlocked, setSecretUnlocked] = useState(false)
+  const [showSecretHint, setShowSecretHint] = useState(false)
+  const [lastClickedFeature, setLastClickedFeature] = useState<string | null>(null)
+
+  const handleFeatureClick = useCallback((key: string) => {
+    setLastClickedFeature(key)
+
+    // Reset hint display
+    setTimeout(() => setLastClickedFeature(null), 300)
+
+    setClickSequence(prev => {
+      const newSeq = [...prev, key]
+
+      // Check if matches the secret sequence so far
+      const matchesSoFar = SECRET_SEQUENCE.slice(0, newSeq.length).every((k, i) => k === newSeq[i])
+
+      if (!matchesSoFar) {
+        // Wrong sequence, reset but show a hint if they got at least 2 right
+        if (prev.length >= 2) {
+          setShowSecretHint(true)
+          setTimeout(() => setShowSecretHint(false), 2000)
+        }
+        return []
+      }
+
+      // Check if complete
+      if (newSeq.length === SECRET_SEQUENCE.length) {
+        setSecretUnlocked(true)
+        // Celebration!
+        return []
+      }
+
+      return newSeq
+    })
+  }, [])
+
   return (
     <div className="min-h-screen">
       <Header />
+
+      {/* Secret mode celebration overlay */}
+      <AnimatePresence>
+        {secretUnlocked && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+            onClick={() => setSecretUnlocked(false)}
+          >
+            <motion.div
+              initial={{ scale: 0, rotate: -180 }}
+              animate={{ scale: 1, rotate: 0 }}
+              exit={{ scale: 0, rotate: 180 }}
+              transition={{ type: 'spring', stiffness: 200 }}
+              className="bg-gradient-to-br from-purple-600 to-pink-600 p-8 text-white text-center max-w-md mx-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <motion.div
+                animate={{ rotate: [0, 10, -10, 0] }}
+                transition={{ duration: 0.5, repeat: 3 }}
+              >
+                <Sparkles size={48} className="mx-auto mb-4" />
+              </motion.div>
+              <h2 className="text-2xl font-bold mb-2">Secret Mode Unlocked!</h2>
+              <p className="text-purple-200 mb-4">
+                You discovered the hidden path: Ground → Water → Forest → Sky
+              </p>
+              <div className="space-y-2 text-sm text-left bg-black/20 p-4 font-mono">
+                <p>+ Toblerone HQ auto-selected</p>
+                <p>+ All features enabled</p>
+                <p>+ Maximum detail mode</p>
+              </div>
+              <p className="text-xs text-purple-300 mt-4">Click anywhere to continue</p>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Hero Section */}
       <section className="relative overflow-hidden">
@@ -104,21 +185,59 @@ export default function Home() {
                 your architectural workflow.
               </p>
 
-              {/* Feature pills */}
+              {/* Feature pills - CLICKABLE for easter egg */}
               <div className="flex flex-wrap gap-2 mb-6">
-                {features.map((f, i) => (
-                  <motion.div
-                    key={f.label}
-                    className="flex items-center gap-2 px-3 py-1.5 bg-sketch-white border border-sketch-pale"
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.3 + i * 0.05 }}
-                  >
-                    <f.icon size={14} className="text-sketch-gray" />
-                    <span className="text-xs font-mono">{f.label}</span>
-                  </motion.div>
-                ))}
+                {features.map((f, i) => {
+                  const isInSequence = clickSequence.includes(f.key)
+                  const isNextInSequence = SECRET_SEQUENCE[clickSequence.length] === f.key
+
+                  return (
+                    <motion.button
+                      key={f.label}
+                      onClick={() => handleFeatureClick(f.key)}
+                      className={`flex items-center gap-2 px-3 py-1.5 border transition-all cursor-pointer ${
+                        isInSequence
+                          ? 'bg-purple-100 border-purple-400 text-purple-700'
+                          : lastClickedFeature === f.key
+                          ? 'bg-sketch-black text-white border-sketch-black'
+                          : 'bg-sketch-white border-sketch-pale hover:border-sketch-gray hover:bg-sketch-paper'
+                      }`}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ delay: 0.3 + i * 0.05 }}
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      title={f.desc}
+                    >
+                      <f.icon size={14} className={isInSequence ? 'text-purple-600' : 'text-sketch-gray'} />
+                      <span className="text-xs font-mono">{f.label}</span>
+                    </motion.button>
+                  )
+                })}
               </div>
+
+              {/* Secret hint */}
+              <AnimatePresence>
+                {showSecretHint && (
+                  <motion.p
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0 }}
+                    className="text-xs text-purple-600 mb-4 font-mono"
+                  >
+                    Hmm, there&apos;s a pattern here... try again from the ground up!
+                  </motion.p>
+                )}
+                {clickSequence.length > 0 && clickSequence.length < SECRET_SEQUENCE.length && (
+                  <motion.p
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="text-xs text-purple-500 mb-4 font-mono"
+                  >
+                    {clickSequence.length}/{SECRET_SEQUENCE.length} — keep going...
+                  </motion.p>
+                )}
+              </AnimatePresence>
 
               <motion.a
                 href="#generator"
@@ -437,7 +556,7 @@ export default function Home() {
             </p>
           </motion.div>
 
-          <GeneratorForm />
+          <GeneratorForm secretMode={secretUnlocked} />
         </div>
       </section>
 
