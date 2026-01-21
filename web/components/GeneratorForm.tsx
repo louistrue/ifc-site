@@ -236,34 +236,6 @@ export default function GeneratorForm() {
 
   return (
     <div className="space-y-8">
-      {/* Active Jobs */}
-      <AnimatePresence>
-        {activeJobs.map((job) => (
-          <motion.div
-            key={job.id}
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, x: -100 }}
-            className="relative"
-          >
-            <div className="absolute -top-2 -left-2 sketch-badge-dark text-[10px] z-10">
-              {job.name || job.location.slice(0, 16)}...
-            </div>
-            <JobTracker
-              jobId={job.id}
-              onComplete={() => {}}
-              onError={(err) => setError(err)}
-            />
-            <button
-              onClick={() => removeJob(job.id)}
-              className="mt-2 text-xs text-sketch-gray hover:text-red-600 transition-colors font-mono"
-            >
-              × Dismiss
-            </button>
-          </motion.div>
-        ))}
-      </AnimatePresence>
-
       {/* Form */}
       <form onSubmit={handleSubmit} className="space-y-8">
         {/* Location Input */}
@@ -547,6 +519,46 @@ export default function GeneratorForm() {
           )}
         </button>
       </form>
+
+      {/* Active Jobs - shown below form so user sees them after clicking generate */}
+      <AnimatePresence>
+        {activeJobs.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="space-y-4"
+          >
+            <div className="flex items-center gap-2 text-sketch-gray">
+              <Loader2 size={16} className="animate-spin" />
+              <span className="text-sm font-mono">Active generations ({activeJobs.length})</span>
+            </div>
+            {activeJobs.map((job) => (
+              <motion.div
+                key={job.id}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                className="relative"
+              >
+                <div className="absolute -top-2 -left-2 sketch-badge-dark text-[10px] z-10">
+                  {job.name || job.location.slice(0, 16)}...
+                </div>
+                <JobTracker
+                  jobId={job.id}
+                  onComplete={() => {}}
+                  onError={(err) => setError(err)}
+                />
+                <button
+                  onClick={() => removeJob(job.id)}
+                  className="mt-2 text-xs text-sketch-gray hover:text-red-600 transition-colors font-mono"
+                >
+                  × Dismiss
+                </button>
+              </motion.div>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   )
 }
