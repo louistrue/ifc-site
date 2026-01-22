@@ -25,6 +25,7 @@ httpx==0.27.2
 
 # Satellite imagery
 requests-cache==1.2.0
+Pillow==11.2.1
 
 # glTF export
 trimesh==4.10.1

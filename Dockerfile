@@ -31,6 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdal32 \
     libproj25 \
     proj-bin \
+    libjpeg62-turbo \
+    libpng16-16 \
+    zlib1g \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
