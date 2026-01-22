@@ -9,6 +9,7 @@ from shapely.geometry import Point, Polygon
 from scipy.spatial import Delaunay
 from typing import List, Tuple, Optional
 import logging
+import mapbox_earcut as earcut
 
 logger = logging.getLogger(__name__)
 
@@ -446,7 +447,6 @@ def triangulate_terrain_with_cutout(
     
     Returns list of triangles, each as [(x1,y1,z1), (x2,y2,z2), (x3,y3,z3)]
     """
-    import mapbox_earcut as earcut
     from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
     
     # Calculate terrain extent
