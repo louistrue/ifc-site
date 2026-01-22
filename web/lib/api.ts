@@ -47,6 +47,14 @@ export interface JobCreateResponse {
   job_id: string
 }
 
+// Helper to ensure value is a string (handles edge cases where API might return unexpected types)
+function ensureString(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined
+  if (typeof value === 'string') return value
+  if (typeof value === 'object') return undefined // Don't stringify objects
+  return String(value)
+}
+
 export async function createJob(request: GenerateRequest): Promise<JobCreateResponse> {
   try {
     const response = await fetch(`${API_URL}/jobs`, {
@@ -80,10 +88,26 @@ export async function getJobStatus(jobId: string): Promise<JobStatus> {
     throw new Error(error.detail || `HTTP ${response.status}`)
   }
 
-  return response.json()
+  const data = await response.json()
+
+  // Sanitize response to ensure URL/name fields are strings
+  return {
+    status: data.status,
+    download_url: ensureString(data.download_url),
+    output_name: ensureString(data.output_name),
+    gltf_download_url: ensureString(data.gltf_download_url),
+    gltf_output_name: ensureString(data.gltf_output_name),
+    texture_download_url: ensureString(data.texture_download_url),
+    texture_output_name: ensureString(data.texture_output_name),
+    error: ensureString(data.error),
+  }
 }
 
-export function getDownloadUrl(path: string): string {
+export function getDownloadUrl(path: string | undefined): string {
+  if (!path || typeof path !== 'string') {
+    console.error('Invalid download path:', path)
+    return '#'
+  }
   return `${API_URL}${path}`
 }
 

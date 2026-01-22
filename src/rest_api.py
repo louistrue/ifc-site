@@ -485,6 +485,9 @@ async def _cleanup_old_jobs():
 
 async def _run_generation(request: GenerateRequest, output_path: str):
     """Run the terrain generation workflow with all parameters."""
+    # Determine if glTF should be exported (explicit True, or auto-enable with satellite)
+    should_export_gltf = _should_have_gltf(request)
+
     return await run_in_threadpool(
         terrain_with_site.run_combined_terrain_workflow,
         egrid=request.egrid,
@@ -513,7 +516,7 @@ async def _run_generation(request: GenerateRequest, output_path: str):
         embed_imagery=request.embed_imagery,
         imagery_resolution=request.imagery_resolution,
         imagery_year=request.imagery_year,
-        export_gltf=request.export_gltf,
+        export_gltf=should_export_gltf,  # Always pass boolean, not None
         apply_texture_to_buildings=request.apply_texture_to_buildings,
     )
 
