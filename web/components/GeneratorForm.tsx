@@ -239,11 +239,19 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
+
+    // Validate address is provided
+    const trimmedAddress = form.address.trim()
+    if (!trimmedAddress) {
+      setError('Please enter a Swiss address or try Lucky Draw')
+      return
+    }
+
     setIsSubmitting(true)
 
     try {
       const request: GenerateRequest = {
-        address: form.address,
+        address: trimmedAddress,
         include_terrain: form.includeTerrain,
         include_site_solid: form.includeSiteSolid,
         include_roads: form.includeRoads,
@@ -608,8 +616,8 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
         {/* Submit */}
         <button
           type="submit"
-          disabled={isSubmitting}
-          className={`w-full py-4 text-base flex items-center justify-center gap-3 disabled:opacity-50 transition-all ${
+          disabled={isSubmitting || !form.address.trim()}
+          className={`w-full py-4 text-base flex items-center justify-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed transition-all ${
             secretMode
               ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white border-2 border-purple-700 hover:from-purple-700 hover:to-pink-700'
               : 'sketch-btn-primary'
@@ -619,6 +627,11 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
             <>
               <Loader2 size={20} className="animate-spin" />
               <span className="animate-pulse">{loadingMsg}</span>
+            </>
+          ) : !form.address.trim() ? (
+            <>
+              <MapPin size={20} />
+              Enter Address or Lucky Draw
             </>
           ) : (
             <>
