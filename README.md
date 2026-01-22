@@ -450,11 +450,15 @@ Swiss railways include various track types:
 
 ```bash
 python src/cli.py \
-  --address "Zürich HB, Zürich" \
+  --address "Kasernenstrasse 97, 8004 Zürich" \
   --include-railways \
   --include-buildings \
   --output station_area.ifc
 ```
+
+![Zurich Main Station Railway Tracks](docs/assets/blender_zh_hb.png)
+
+*Example output: Railway tracks at Zürich Hauptbahnhof visualized in BlenderBIM with surrounding buildings*
 
 **All features including railways:**
 
