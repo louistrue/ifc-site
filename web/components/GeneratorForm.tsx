@@ -189,6 +189,11 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
         updated.resolution = getAdaptiveResolution(value)
       }
 
+      // Auto-enable glTF export when satellite is enabled
+      if (key === 'includeSatellite' && value === true) {
+        updated.exportGltf = true
+      }
+
       // Limit feature count - disable oldest enabled feature if limit exceeded
       const featureKeys: (keyof FormState)[] = [
         'includeRoads', 'includeBuildings', 'includeForest',
@@ -640,10 +645,6 @@ export default function GeneratorForm({ secretMode = false }: GeneratorFormProps
             </>
           )}
         </button>
-
-        <p className="text-center text-[10px] text-sketch-gray/50 select-none">
-          Made with Swiss precision · v0.1
-        </p>
       </form>
 
       {/* Active Jobs */}
