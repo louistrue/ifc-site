@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 import time
@@ -341,6 +342,86 @@ JOB_TTL_SECONDS = float(os.getenv("JOB_TTL_SECONDS", "86400"))  # 24 hours defau
 JOB_MAX_COUNT = int(os.getenv("JOB_MAX_COUNT", "1000"))  # Max stored jobs
 CLEANUP_INTERVAL_SECONDS = float(os.getenv("CLEANUP_INTERVAL_SECONDS", "3600"))  # 1 hour default
 
+# Job persistence file - survives server restarts
+_tmpdir = os.getenv("TMPDIR", tempfile.gettempdir())
+JOBS_PERSISTENCE_FILE = os.path.join(_tmpdir, "ifc_site_jobs.json")
+
+
+def _job_to_dict(job_id: str, job: JobRecord) -> dict:
+    """Serialize a JobRecord to a dictionary."""
+    return {
+        "job_id": job_id,
+        "status": job.status,
+        "output_name": job.output_name,
+        "path": job.path,
+        "gltf_path": job.gltf_path,
+        "texture_path": job.texture_path,
+        "has_gltf": job.has_gltf,
+        "error": job.error,
+        "created_at": job.created_at,
+        "finished_at": job.finished_at,
+    }
+
+
+def _dict_to_job(data: dict) -> JobRecord:
+    """Deserialize a dictionary to a JobRecord."""
+    job = JobRecord(output_name=data.get("output_name", "output.ifc"))
+    job.status = data.get("status", "pending")
+    job.path = data.get("path")
+    job.gltf_path = data.get("gltf_path")
+    job.texture_path = data.get("texture_path")
+    job.has_gltf = data.get("has_gltf", False)
+    job.error = data.get("error")
+    job.created_at = data.get("created_at", time.time())
+    job.finished_at = data.get("finished_at")
+    return job
+
+
+def _save_jobs():
+    """Save all jobs to persistence file."""
+    try:
+        data = [_job_to_dict(job_id, job) for job_id, job in jobs.items()]
+        with open(JOBS_PERSISTENCE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Warning: Failed to save jobs to disk: {e}")
+
+
+def _load_jobs():
+    """Load jobs from persistence file."""
+    global jobs
+    if not os.path.exists(JOBS_PERSISTENCE_FILE):
+        return
+
+    try:
+        with open(JOBS_PERSISTENCE_FILE, "r") as f:
+            data = json.load(f)
+
+        loaded_count = 0
+        for item in data:
+            job_id = item.get("job_id")
+            if not job_id:
+                continue
+
+            job = _dict_to_job(item)
+
+            # Only restore completed jobs with existing files
+            # Skip pending/running jobs (they won't complete after restart)
+            if job.status == "completed":
+                if job.path and os.path.exists(job.path):
+                    jobs[job_id] = job
+                    loaded_count += 1
+            elif job.status in ("failed", "expired"):
+                # Keep failed/expired jobs for status lookup
+                jobs[job_id] = job
+                loaded_count += 1
+
+        if loaded_count > 0:
+            print(f"Restored {loaded_count} jobs from previous session")
+
+    except Exception as e:
+        print(f"Warning: Failed to load jobs from disk: {e}")
+
 
 def _ensure_ifc_extension(name: str) -> str:
     if not name.lower().endswith(".ifc"):
@@ -444,11 +525,12 @@ async def _cleanup_old_jobs():
     while True:
         try:
             await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
-            
+
+            removed_count = 0
             async with job_lock:
                 current_time = time.time()
                 jobs_to_remove = []
-                
+
                 # First pass: Remove jobs older than TTL
                 for job_id, job in jobs.items():
                     if job.finished_at and (current_time - job.finished_at) > JOB_TTL_SECONDS:
@@ -456,28 +538,34 @@ async def _cleanup_old_jobs():
                     elif not job.finished_at and (current_time - job.created_at) > JOB_TTL_SECONDS:
                         # Also remove very old pending/running jobs (stuck jobs)
                         jobs_to_remove.append(job_id)
-                
+
                 # Remove TTL-expired jobs
                 for job_id in jobs_to_remove:
                     job = jobs[job_id]
                     _cleanup_job_files(job)
                     del jobs[job_id]
-                
+                    removed_count += 1
+
                 # Second pass: If still over max count, remove oldest finished jobs
                 if len(jobs) > JOB_MAX_COUNT:
                     finished_jobs = [
-                        (job_id, job) 
-                        for job_id, job in jobs.items() 
+                        (job_id, job)
+                        for job_id, job in jobs.items()
                         if job.finished_at is not None
                     ]
                     # Sort by finished_at, oldest first
                     finished_jobs.sort(key=lambda x: x[1].finished_at or 0)
-                    
+
                     excess_count = len(jobs) - JOB_MAX_COUNT
                     for job_id, job in finished_jobs[:excess_count]:
                         _cleanup_job_files(job)
                         del jobs[job_id]
-                        
+                        removed_count += 1
+
+                # Persist changes if any jobs were removed
+                if removed_count > 0:
+                    _save_jobs()
+
         except Exception as e:
             # Log error but continue cleanup loop
             print(f"Error in job cleanup task: {e}")
@@ -523,7 +611,11 @@ async def _run_generation(request: GenerateRequest, output_path: str):
 
 @app.on_event("startup")
 async def startup_event():
-    """Start background cleanup task on application startup"""
+    """Start background cleanup task and restore jobs on application startup"""
+    # Restore jobs from previous session
+    _load_jobs()
+
+    # Start cleanup task
     cleanup_task = asyncio.create_task(_cleanup_old_jobs())
     _background_tasks.add(cleanup_task)
     cleanup_task.add_done_callback(_background_tasks.discard)
@@ -531,7 +623,11 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Cancel background tasks on shutdown"""
+    """Save jobs and cancel background tasks on shutdown"""
+    # Save jobs before shutdown
+    _save_jobs()
+
+    # Cancel background tasks
     for task in _background_tasks:
         task.cancel()
     await asyncio.gather(*_background_tasks, return_exceptions=True)
@@ -621,6 +717,7 @@ async def _execute_job(job_id: str, request: GenerateRequest):
     async with job_lock:
         job = jobs[job_id]
         job.status = "running"
+        _save_jobs()  # Persist state change
 
     # Use TMPDIR if set (for Docker container security)
     tmpdir = os.getenv("TMPDIR", tempfile.gettempdir())
@@ -637,6 +734,7 @@ async def _execute_job(job_id: str, request: GenerateRequest):
             job.status = "failed"
             job.error = detail
             job.finished_at = time.time()
+            _save_jobs()  # Persist state change
         _cleanup_file(tmp_path)
         # Also cleanup any glTF/texture files that might have been created
         _cleanup_file(_get_gltf_path(tmp_path))
@@ -658,6 +756,8 @@ async def _execute_job(job_id: str, request: GenerateRequest):
         if os.path.exists(texture_path):
             job.texture_path = texture_path
 
+        _save_jobs()  # Persist state change
+
 
 @app.post(
     "/jobs",
@@ -677,6 +777,7 @@ async def create_job(request: Request, body: GenerateRequest):
 
     async with job_lock:
         jobs[job_id] = JobRecord(output_name=output_name)
+        _save_jobs()  # Persist new job
 
     task = asyncio.create_task(_execute_job(job_id, body))
     _background_tasks.add(task)
